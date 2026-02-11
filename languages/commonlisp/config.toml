@@ -1,0 +1,9 @@
+name = "Common Lisp"
+grammar = "commonlisp"
+path_suffixes = ["lisp", "lsp", "l", "cl", "asd", "ros"]
+line_comments = ["; "]
+block_comment = ["#|", "|#"]
+tab_size = 2
+hard_tabs = false
+
+[language_servers.zed-cl]

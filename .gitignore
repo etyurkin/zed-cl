@@ -1,0 +1,14 @@
+# IDE
+.idea/
+
+# Rust build artifacts
+target/
+Cargo.lock
+bin/
+
+# Compiled extension
+extension.wasm
+grammars/
+
+# Common Lisp compiled files
+*.fasl

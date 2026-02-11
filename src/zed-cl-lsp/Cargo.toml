@@ -1,0 +1,43 @@
+[package]
+name = "zed-cl-lsp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# LSP framework
+tower-lsp = "0.20"
+tokio = { version = "1.35", features = ["full"] }
+
+# Master REPL communication
+common-rust = { path = "../zed-cl-common" }
+
+# ZeroMQ for kernel shutdown broadcast (pure Rust)
+zeromq = { version = "0.5.0", features = ["tokio-runtime"] }
+
+# JSON and serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Tree-sitter for syntax parsing
+tree-sitter = "0.25"
+tree-sitter-commonlisp = { path = "../../grammars/commonlisp" }
+
+# Symbol indexing
+redb = "2.2"
+bincode = "1.3"
+zed-cl-indexer = { path = "../zed-cl-index" }
+
+# Regex for documentation formatting
+regex = "1.10"
+
+[[bin]]
+name = "zed-cl-lsp"
+path = "src/main.rs"

@@ -1,0 +1,16 @@
+{
+  "display_name": "Common Lisp (Zed)",
+  "language": "Common Lisp",
+  "argv": [
+    "KERNEL_PATH_PLACEHOLDER",
+    "{connection_file}"
+  ],
+  "env": {
+    "ZED_CL_MASTER_REPL_ENDPOINT": "tcp://127.0.0.1:5555",
+    "RUST_LOG": "debug"
+  },
+  "interrupt_mode": "message",
+  "metadata": {
+    "debugger": false
+  }
+}

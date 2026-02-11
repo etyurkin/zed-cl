@@ -1,0 +1,15 @@
+id = "zed-cl"
+name = "Common Lisp"
+version = "0.0.1"
+schema_version = 1
+authors = ["Evgeniy Tyurkin <etyurkin@icloud.com>"]
+description = "Common Lisp support for Zed"
+repository = "https://github.com/your-username/zed-commonlisp"
+
+[grammars.commonlisp]
+repository = "https://github.com/tree-sitter-grammars/tree-sitter-commonlisp"
+rev = "4d2a2247bb0ec117193ef33e3ce546a6781c5bf5"
+
+[language_servers.zed-cl]
+name = "zed-cl"
+language = "Common Lisp"

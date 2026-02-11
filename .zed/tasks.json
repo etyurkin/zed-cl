@@ -1,0 +1,9 @@
+[
+  {
+    "label": "Common Lisp REPL",
+    "command": "./bin/zed-cl-repl",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "hide": "always"
+  }
+]

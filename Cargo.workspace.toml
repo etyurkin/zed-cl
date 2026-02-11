@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "common-rust",
+    "rust-lsp",
+    "rust-kernel",
+]
+resolver = "2"
+
+# The main Cargo.toml is for the Zed WASM extension
+# This workspace is for the native Rust binaries (LSP + Kernel)
+
+[workspace.dependencies]
+# Shared dependencies across workspace
+tokio = { version = "1.35", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"

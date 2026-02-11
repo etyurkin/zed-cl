@@ -1,0 +1,14 @@
+[package]
+name = "zed-cl-repl-tui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "zed-cl-repl"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+anyhow = "1.0"
+common-rust = { path = "../zed-cl-common" }
