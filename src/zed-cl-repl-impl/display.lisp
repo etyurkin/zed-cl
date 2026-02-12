@@ -56,13 +56,11 @@
 
 ;;; JSON Display
 (defun display-json (json-string &key metadata)
-  "Display JSON data as formatted markdown code block.
-   Note: Zed stable (v0.221.5) doesn't support JSON viewer yet.
-   JSON support was added in preview builds after Jan 30, 2026.
+  "Display JSON data with native JSON rendering.
    Example: (zed-cl:display-json \"{\\\"name\\\": \\\"Alice\\\", \\\"age\\\": 30}\")"
-  ;; Format as markdown code block since Zed stable doesn't support application/json yet
-  (let ((formatted (format nil "```json~%~A~%```" json-string)))
-    (display-markdown formatted :metadata metadata)))
+  (let ((data (make-hash-table :test 'equal)))
+    (setf (gethash "application/json" data) json-string)
+    (display data :metadata metadata)))
 
 ;;; Table Display (as Markdown)
 (defun display-table (rows &key headers metadata)
@@ -140,4 +138,3 @@
                  (push (cons k v) result))
                ht)
       (nreverse result))))
-
