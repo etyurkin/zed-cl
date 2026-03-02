@@ -196,8 +196,13 @@ check: setup-quicklisp verify-lisp
 	@echo "$(GREEN)✓ All checks passed$(NC)"
 
 verify-lisp:
-	@sbcl --script scripts/verify-repl.lisp 2>&1 | { grep -v "^;" || true; }
-	@if [ $$? -eq 0 ]; then \
+	@sbcl --noinform \
+	--eval '(handler-case (progn (let ((quicklisp-init (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))) (when (probe-file quicklisp-init) (load quicklisp-init))) (require :asdf) (push (truename "src/zed-cl-repl-impl/") asdf:*central-registry*) (asdf:load-system :zed-cl/master-repl) (funcall (intern "EVAL-FORMS-FROM-CODE" :zed-cl.master-repl) "(+ 1 2)" nil nil nil) (sb-ext:exit :code 0)) (error (e) (format *error-output* "✗ REPL Lisp verification failed: ~A~%" e) (sb-ext:exit :code 1)))' \
+	> .verify-lisp.log 2>&1; \
+	RET=$$?; \
+	grep -v "^;" .verify-lisp.log || true; \
+	rm -f .verify-lisp.log; \
+	if [ $$RET -eq 0 ]; then \
 		echo "$(GREEN)✓ REPL Lisp files compiled successfully$(NC)"; \
 	else \
 		exit 1; \
