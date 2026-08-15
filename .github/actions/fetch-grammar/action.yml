@@ -1,0 +1,14 @@
+name: Fetch tree-sitter grammar
+description: Clone the Common Lisp grammar at the revision pinned in extension.toml
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch tree-sitter grammar
+      shell: bash
+      run: |
+        mkdir -p grammars
+        git init grammars/commonlisp
+        git -C grammars/commonlisp remote add origin https://github.com/tree-sitter-grammars/tree-sitter-commonlisp
+        git -C grammars/commonlisp fetch --depth 1 origin 4d2a2247bb0ec117193ef33e3ce546a6781c5bf5
+        git -C grammars/commonlisp checkout FETCH_HEAD

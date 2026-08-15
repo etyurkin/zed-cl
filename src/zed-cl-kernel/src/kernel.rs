@@ -1,9 +1,10 @@
 /// Jupyter kernel implementation using zeromq (pure Rust)
 
 use anyhow::Result;
-use aws_lc_rs::hmac;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use bytes::Bytes;
-use common_rust::{MasterReplClient, ReplRequest};
+use common_rust::{MasterReplClient, ReplRequest, KERNEL_SHUTDOWN_ENDPOINT};
 use data_encoding::HEXLOWER;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -13,6 +14,8 @@ use tracing::{debug, error, info, warn};
 use zeromq::{Socket, SocketRecv, SocketSend};
 
 use crate::connection::ConnectionInfo;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Execution counter for kernel
 struct ExecutionState {
@@ -25,17 +28,17 @@ const DELIMITER: &[u8] = b"<IDS|MSG>";
 /// Connection wrapper with HMAC signing
 struct Connection<S> {
     socket: S,
-    mac: Option<hmac::Key>,
+    hmac_key: Option<Vec<u8>>,
 }
 
 impl<S> Connection<S> {
     fn new(socket: S, key: &str) -> Self {
-        let mac = if key.is_empty() {
+        let hmac_key = if key.is_empty() {
             None
         } else {
-            Some(hmac::Key::new(hmac::HMAC_SHA256, key.as_bytes()))
+            Some(key.as_bytes().to_vec())
         };
-        Connection { socket, mac }
+        Connection { socket, hmac_key }
     }
 }
 
@@ -58,14 +61,16 @@ impl<S: SocketRecv> Connection<S> {
         let identities = parts;
 
         // Verify HMAC if key is present
-        if let Some(ref key) = self.mac {
+        if let Some(ref key) = self.hmac_key {
             let sig = HEXLOWER.decode(&expected_hmac)?;
             let mut msg = Vec::new();
-            // Only include header, parent_header, metadata, and content in the HMAC
             for part in &jparts[..4.min(jparts.len())] {
                 msg.extend_from_slice(part);
             }
-            hmac::verify(key, msg.as_ref(), sig.as_ref())
+            let mut mac = HmacSha256::new_from_slice(key)
+                .map_err(|_| anyhow::anyhow!("invalid HMAC key"))?;
+            mac.update(&msg);
+            mac.verify_slice(&sig)
                 .map_err(|_| anyhow::anyhow!("HMAC verification failed"))?;
         }
 
@@ -109,14 +114,14 @@ impl<S: SocketSend> Connection<S> {
         let content_bytes = serde_json::to_vec(content)?;
 
         // Compute HMAC
-        let hmac_str = if let Some(ref key) = self.mac {
-            let mut ctx = hmac::Context::with_key(key);
-            ctx.update(&header_bytes);
-            ctx.update(&parent_header_bytes);
-            ctx.update(&metadata_bytes);
-            ctx.update(&content_bytes);
-            let tag = ctx.sign();
-            HEXLOWER.encode(tag.as_ref())
+        let hmac_str = if let Some(ref key) = self.hmac_key {
+            let mut mac = HmacSha256::new_from_slice(key)
+                .map_err(|_| anyhow::anyhow!("invalid HMAC key"))?;
+            mac.update(&header_bytes);
+            mac.update(&parent_header_bytes);
+            mac.update(&metadata_bytes);
+            mac.update(&content_bytes);
+            HEXLOWER.encode(mac.finalize().into_bytes().as_ref())
         } else {
             String::new()
         };
@@ -149,13 +154,17 @@ pub struct LispKernel {
 
 impl LispKernel {
     /// Create a new Lisp kernel
-    pub async fn new(connection_file: PathBuf, master_repl_endpoint: String) -> Result<Self> {
+    pub async fn new(connection_file: PathBuf) -> Result<Self> {
         info!("Loading connection file...");
         let connection_info = ConnectionInfo::from_file(&connection_file)?;
 
         info!("Connecting to master REPL...");
-        let mut master_repl = MasterReplClient::new(master_repl_endpoint);
-        master_repl.connect()?;
+        let master_repl = tokio::task::spawn_blocking(|| {
+            let mut client = MasterReplClient::new();
+            client.connect()?;
+            Ok::<_, anyhow::Error>(client)
+        })
+        .await??;
 
         Ok(Self {
             connection_info,
@@ -172,27 +181,62 @@ impl LispKernel {
         let mut shell_socket = zeromq::RouterSocket::new();
         let mut iopub_socket = zeromq::PubSocket::new();
         let mut control_socket = zeromq::RouterSocket::new();
+        let mut stdin_socket = zeromq::RouterSocket::new();
+        let mut hb_socket = zeromq::RepSocket::new();
 
-        // Subscribe to shutdown broadcasts from LSP server
         let mut shutdown_socket = zeromq::SubSocket::new();
-        shutdown_socket.connect("tcp://127.0.0.1:5557").await?;
+        shutdown_socket.connect(KERNEL_SHUTDOWN_ENDPOINT).await?;
         shutdown_socket.subscribe("").await?;
-        info!("Subscribed to shutdown broadcasts on tcp://127.0.0.1:5557");
+        info!("Subscribed to shutdown broadcasts on {KERNEL_SHUTDOWN_ENDPOINT}");
 
-        // Bind sockets
         shell_socket.bind(&self.connection_info.shell_address()).await?;
         iopub_socket.bind(&self.connection_info.iopub_address()).await?;
         control_socket.bind(&self.connection_info.control_address()).await?;
+        stdin_socket.bind(&self.connection_info.stdin_address()).await?;
+        hb_socket.bind(&self.connection_info.hb_address()).await?;
 
         info!("Kernel started on:");
         info!("  Shell: {}", self.connection_info.shell_address());
         info!("  IOPub: {}", self.connection_info.iopub_address());
         info!("  Control: {}", self.connection_info.control_address());
+        info!("  Stdin: {}", self.connection_info.stdin_address());
+        info!("  Heartbeat: {}", self.connection_info.hb_address());
 
         // Create connections with HMAC
         let mut shell = Connection::new(shell_socket, &self.connection_info.key);
         let mut iopub = Connection::new(iopub_socket, &self.connection_info.key);
         let mut control = Connection::new(control_socket, &self.connection_info.key);
+
+        tokio::spawn(async move {
+            info!("Starting heartbeat...");
+            loop {
+                match hb_socket.recv().await {
+                    Ok(msg) => {
+                        if let Err(e) = hb_socket.send(msg).await {
+                            error!("Heartbeat send error: {}", e);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Heartbeat recv error: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            info!("Starting stdin listener...");
+            loop {
+                match stdin_socket.recv().await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        debug!("Stdin recv ended: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
 
         // Spawn shutdown monitor task
         tokio::spawn(async move {
@@ -421,7 +465,11 @@ impl LispKernel {
             file_character,
         };
 
-        let result = self.master_repl.write().await.send_request(request);
+        let result = {
+            let client = Arc::clone(&self.master_repl);
+            tokio::task::spawn_blocking(move || client.blocking_write().send_request(request))
+                .await?
+        };
 
         // Send result back
         match result {

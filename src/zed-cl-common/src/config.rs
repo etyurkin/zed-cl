@@ -1,6 +1,6 @@
-/// Shared configuration for all zed-cl components
+/// Shared configuration for all zed-cl components.
 ///
-/// Reads from ~/.zed-cl/config.json with profile support
+/// Reads from ~/.zed-cl/config.json with profile support.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -30,6 +30,12 @@ pub struct Profile {
     pub completion_package_whitelist: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplConnection {
+    pub host: String,
+    pub port: u16,
+}
+
 fn default_active_profile() -> String {
     "sbcl".to_string()
 }
@@ -53,29 +59,54 @@ impl Default for Profile {
 }
 
 impl Profile {
-    /// Get the active profile instance
     pub fn get() -> &'static Profile {
-        ACTIVE_PROFILE.get_or_init(|| {
-            Self::load_active().unwrap_or_default()
-        })
+        ACTIVE_PROFILE.get_or_init(|| Self::load_active().unwrap_or_default())
     }
 
-    /// Load the active profile from ~/.zed-cl/config.json
     fn load_active() -> Option<Profile> {
-        let home = std::env::var("HOME").ok()?;
-        let config_path = PathBuf::from(home).join(".zed-cl/config.json");
-
+        let config_path = data_dir().join("config.json");
         let content = std::fs::read_to_string(config_path).ok()?;
         let config_file = serde_json::from_str::<ConfigFile>(&content).ok()?;
-
-        config_file.profiles.get(&config_file.active_profile).cloned()
+        config_file
+            .profiles
+            .get(&config_file.active_profile)
+            .cloned()
     }
 
-    /// Get implementation-specific socket path (dynamic property)
-    pub fn socket_path(&self) -> PathBuf {
-        PathBuf::from(format!("/tmp/zed-cl-repl-{}.sock", self.lisp_impl))
+    pub fn connection_file_path(&self) -> PathBuf {
+        data_dir().join(format!("repl-{}.json", self.lisp_impl))
+    }
+
+    pub fn read_connection(&self) -> Option<ReplConnection> {
+        let path = self.connection_file_path();
+        let content = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&content).ok()
     }
 }
 
-// Maintain backward compatibility with old Config name
+pub fn home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(PathBuf::from)
+    }
+}
+
+pub fn data_dir() -> PathBuf {
+    home_dir()
+        .map(|h| h.join(".zed-cl"))
+        .unwrap_or_else(|| PathBuf::from(".zed-cl"))
+}
+
+pub fn log_dir() -> PathBuf {
+    let dir = data_dir().join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 pub type Config = Profile;

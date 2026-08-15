@@ -1,19 +1,24 @@
 .PHONY: all build build-lsp build-kernel build-repl-tui build-extension clean test install-dev help verify-lisp verify setup-grammar setup-quicklisp build-system-index build-system-index-if-missing build-indexer bundle register-kernel check
 
 # Rust binary names
-LSP_BIN := zed-cl-lsp
-KERNEL_BIN := zed-cl-kernel
-REPL_TUI_BIN := zed-cl-repl
+ifeq ($(OS),Windows_NT)
+EXE := .exe
+else
+EXE :=
+endif
+LSP_BIN := zed-cl-lsp$(EXE)
+KERNEL_BIN := zed-cl-kernel$(EXE)
+REPL_TUI_BIN := zed-cl-repl$(EXE)
 
 # Grammar settings
 GRAMMAR_REPO := https://github.com/tree-sitter-grammars/tree-sitter-commonlisp
 GRAMMAR_DIR := grammars/commonlisp
 
 # Index settings
-SBCL_SRC_DIR := $(shell brew --prefix sbcl 2>/dev/null || echo "/usr/local")/share/sbcl/src
+SBCL_SRC_DIR := $(firstword $(wildcard $(shell brew --prefix sbcl 2>/dev/null)/share/sbcl/src /usr/local/share/sbcl/src /usr/share/sbcl/src /usr/share/sbcl-source/src))
 INDEX_DIR := $(HOME)/.zed-cl
 SYSTEM_INDEX := $(INDEX_DIR)/system-index.db
-INDEXER_BIN := src/zed-cl-index/target/release/zed-cl-index
+INDEXER_BIN := src/zed-cl-index/target/release/zed-cl-index$(EXE)
 
 # Build directories
 LSP_DIR := src/zed-cl-lsp
@@ -183,9 +188,9 @@ build-repl-tui:
 
 build-extension:
 	@echo "$(BLUE)Building Zed extension WASM...$(NC)"
-	@rustup target add wasm32-wasip1 2>/dev/null || true
-	@cargo build --release --target wasm32-wasip1
-	@cp target/wasm32-wasip1/release/zed_commonlisp.wasm extension.wasm
+	@rustup target add wasm32-wasip2 2>/dev/null || true
+	@cargo build --release --target wasm32-wasip2
+	@cp target/wasm32-wasip2/release/zed_commonlisp.wasm extension.wasm
 	@echo "$(GREEN)✓ Extension WASM built$(NC)"
 
 check: setup-quicklisp verify-lisp
@@ -224,6 +229,7 @@ test:
 	@echo "$(BLUE)Running tests...$(NC)"
 	@cargo test --manifest-path=$(LSP_DIR)/Cargo.toml
 	@cargo test --manifest-path=$(KERNEL_DIR)/Cargo.toml
+	@cargo test --manifest-path=src/zed-cl-common/Cargo.toml
 	@echo "$(GREEN)✓ Tests passed$(NC)"
 
 # Bundle binaries for Zed extension
@@ -235,10 +241,12 @@ bundle: build-lsp build-kernel build-repl-tui build-indexer
 	@cp $(REPL_TUI_BUILD_DIR)/$(REPL_TUI_BIN) $(EXTENSION_BIN_DIR)/
 	@cp $(INDEXER_BIN) $(EXTENSION_BIN_DIR)/
 	@xattr -cr $(EXTENSION_BIN_DIR) 2>/dev/null || true
-	@codesign --force --deep --sign - $(EXTENSION_BIN_DIR)/$(LSP_BIN) 2>/dev/null || echo "Warning: codesign failed for LSP binary"
-	@codesign --force --deep --sign - $(EXTENSION_BIN_DIR)/$(KERNEL_BIN) 2>/dev/null || echo "Warning: codesign failed for kernel binary"
-	@codesign --force --deep --sign - $(EXTENSION_BIN_DIR)/$(REPL_TUI_BIN) 2>/dev/null || echo "Warning: codesign failed for TUI REPL binary"
-	@codesign --force --deep --sign - $(EXTENSION_BIN_DIR)/zed-cl-index 2>/dev/null || echo "Warning: codesign failed for indexer binary"
+	@if [ "$$(uname)" = "Darwin" ]; then \
+		codesign --force --deep --sign - $(EXTENSION_BIN_DIR)/$(LSP_BIN) 2>/dev/null || true; \
+		codesign --force --deep --sign - $(EXTENSION_BIN_DIR)/$(KERNEL_BIN) 2>/dev/null || true; \
+		codesign --force --deep --sign - $(EXTENSION_BIN_DIR)/$(REPL_TUI_BIN) 2>/dev/null || true; \
+		codesign --force --deep --sign - $(EXTENSION_BIN_DIR)/zed-cl-index$(EXE) 2>/dev/null || true; \
+	fi
 	@echo "$(GREEN)✓ Binaries bundled in $(EXTENSION_BIN_DIR)/$(NC)"
 
 clean:
@@ -261,30 +269,24 @@ clean:
 
 # Install extension for local development
 install-dev: build
-	@echo "$(GREEN)✓ Extension built with embedded binaries!$(NC)"
+	@echo "$(GREEN)✓ Extension ready for Zed.$(NC)"
 	@echo ""
-	@echo "To install: In Zed, run: Cmd+Shift+P → 'zed: install dev extension' → select this directory"
-	@echo ""
-	@echo "The extension.wasm (9.2M) contains:"
-	@echo "  - LSP binary (6.3M) - Autocomplete, hover, symbol info"
-	@echo "  - Kernel binary (2.8M) - Code execution (works in Zed + Jupyter)"
-	@echo "  - WASM code (~140K)"
-	@echo ""
-	@echo "No external Jupyter installation needed for Zed REPL!"
-	@echo "Just open a .lisp file and press Ctrl+Shift+Enter to run code."
+	@echo "In Zed: command palette → zed: install dev extension → this directory"
+	@echo "Native binaries live in bin/ (not inside WASM). Open a .lisp file and press Ctrl+Shift+Enter."
 
 # Register kernel for Zed (required for REPL to work)
 register-kernel: bundle
 	@echo "$(BLUE)Registering kernel for Zed...$(NC)"
-	@# Determine Jupyter directory (macOS vs Linux)
 	@if [ "$$(uname)" = "Darwin" ]; then \
 		JUPYTER_DIR=~/Library/Jupyter/kernels/commonlisp-zed; \
+	elif [ "$$(uname -s | cut -c1-5)" = "MINGW" ] || [ "$$(uname -s | cut -c1-4)" = "MSYS" ]; then \
+		JUPYTER_DIR="$$APPDATA/jupyter/kernels/commonlisp-zed"; \
 	else \
 		JUPYTER_DIR=~/.local/share/jupyter/kernels/commonlisp-zed; \
 	fi; \
 	mkdir -p "$$JUPYTER_DIR"; \
 	KERNEL_PATH=$$(cd $(EXTENSION_BIN_DIR) && pwd)/$(KERNEL_BIN); \
-	sed "s|KERNEL_PATH_PLACEHOLDER|$$KERNEL_PATH|g" kernels/commonlisp/kernel.json > "$$JUPYTER_DIR/kernel.json"; \
+	sed -e "s|KERNEL_PATH_PLACEHOLDER|$$KERNEL_PATH|g" -e "s|EXTENSION_DIR_PLACEHOLDER|$$(pwd)|g" kernels/commonlisp/kernel.json > "$$JUPYTER_DIR/kernel.json"; \
 	echo "$(GREEN)✓ Kernel registered at $$JUPYTER_DIR for Zed REPL$(NC)"
 
 # Verify prerequisites
@@ -292,7 +294,7 @@ verify:
 	@echo "$(BLUE)Verifying installation...$(NC)"
 	@echo ""
 	@echo "Checking SBCL..."
-	@which sbcl > /dev/null && echo "$(GREEN)  ✓ SBCL found: $$(sbcl --version 2>&1 | head -1)$(NC)" || (echo "$(YELLOW)  ✗ SBCL not found$(NC)" && echo "    Install: brew install sbcl (macOS) or apt install sbcl (Linux)")
+	@which sbcl > /dev/null && echo "$(GREEN)  ✓ SBCL found: $$(sbcl --version 2>&1 | head -1)$(NC)" || (echo "$(YELLOW)  ✗ SBCL not found$(NC)" && echo "    Install: brew install sbcl (macOS), apt install sbcl (Linux), or http://www.sbcl.org (Windows)")
 	@echo ""
 	@echo "Checking Jupyter (optional for standalone use)..."
 	@which jupyter > /dev/null && echo "$(GREEN)  ✓ Jupyter found: $$(jupyter --version 2>&1 | head -1)$(NC)" || echo "$(YELLOW)  ℹ Jupyter not installed (optional)$(NC)"

@@ -81,7 +81,7 @@
 
 ;; The shared master REPL architecture means:
 ;;
-;; 1. ONE master SBCL process runs at /tmp/zed-cl-master-repl.sock
+;; 1. ONE master Lisp process listens on 127.0.0.1 (see ~/.zed-cl/repl-sbcl.json)
 ;; 2. Each file gets its own Jupyter kernel (one per file in Zed)
 ;; 3. ALL kernels connect to the SAME master REPL
 ;; 4. Functions, variables, and state are shared across ALL files

@@ -28,7 +28,8 @@ data-encoding = "2.5"
 bytes = "1.5"
 
 # HMAC for message signing (same as runtimelib)
-aws-lc-rs = "1.10"
+hmac = "0.12"
+sha2 = "0.10"
 
 [[bin]]
 name = "zed-cl-kernel"

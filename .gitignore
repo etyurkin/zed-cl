@@ -3,7 +3,6 @@
 
 # Rust build artifacts
 target/
-Cargo.lock
 bin/
 
 # Compiled extension

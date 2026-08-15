@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: target
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/fetch-grammar
+      - run: cargo test --manifest-path src/zed-cl-common/Cargo.toml
+      - run: cargo test --manifest-path src/zed-cl-lsp/Cargo.toml
+      - run: cargo test --manifest-path src/zed-cl-kernel/Cargo.toml
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - run: cargo check --release --target wasm32-wasip2
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            asset: zed-cl-macos-aarch64.zip
+          - os: macos-15-intel
+            asset: zed-cl-macos-x86_64.zip
+          - os: ubuntu-latest
+            asset: zed-cl-linux-x86_64.zip
+          - os: windows-latest
+            asset: zed-cl-windows-x86_64.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-native
+        with:
+          asset: ${{ matrix.asset }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}

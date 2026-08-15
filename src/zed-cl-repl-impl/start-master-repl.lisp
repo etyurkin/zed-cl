@@ -5,9 +5,7 @@
 
 (in-package :cl-user)
 
-;; Load required modules (portable)
 (require :asdf)
-(require :sb-bsd-sockets)
 
 ;; Load bootstrap utilities (ASDF setup)
 (load (merge-pathnames "bootstrap.lisp"
@@ -16,6 +14,8 @@
 
 ;; Setup ASDF to find our systems
 (setup-asdf-registry (or *load-truename* *compile-file-truename*))
+
+(ignore-errors (asdf:load-system :cl-json :verbose nil))
 
 ;; Load the minimal master REPL system (no longer needs full Jupyter stack)
 (handler-case

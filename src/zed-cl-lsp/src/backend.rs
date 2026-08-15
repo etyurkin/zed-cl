@@ -1,6 +1,6 @@
 /// LSP backend implementation
 
-use common_rust::{MasterReplClient, ReplRequest};
+use common_rust::{MasterReplClient, ReplRequest, KERNEL_SHUTDOWN_ENDPOINT};
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 use tower_lsp::jsonrpc::Result;
@@ -25,13 +25,8 @@ pub struct LispLspBackend {
 }
 
 impl LispLspBackend {
-    pub fn new(
-        client: Client,
-        endpoint: String,
-    ) -> Self {
-        // Use ~/.zed-cl/ for databases
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let db_dir = std::path::PathBuf::from(home).join(".zed-cl");
+    pub fn new(client: Client) -> Self {
+        let db_dir = common_rust::data_dir();
 
         // Get system index name from profile config
         let profile = common_rust::Config::get();
@@ -67,9 +62,9 @@ impl LispLspBackend {
 
         tokio::spawn(async move {
             let mut socket = zeromq::PubSocket::new();
-            match socket.bind("tcp://127.0.0.1:5557").await {
+            match socket.bind(KERNEL_SHUTDOWN_ENDPOINT).await {
                 Ok(_) => {
-                    info!("Shutdown broadcast socket bound to tcp://127.0.0.1:5557");
+                    info!("Shutdown broadcast socket bound to {KERNEL_SHUTDOWN_ENDPOINT}");
 
                     // Wait for shutdown signal
                     shutdown_rx.recv().await;
@@ -92,7 +87,7 @@ impl LispLspBackend {
 
         Self {
             client,
-            master_repl: Arc::new(RwLock::new(MasterReplClient::new(endpoint))),
+            master_repl: Arc::new(RwLock::new(MasterReplClient::new())),
             documents: Arc::new(RwLock::new(DocumentTracker::new())),
             symbol_index,
             user_index,
@@ -101,8 +96,13 @@ impl LispLspBackend {
         }
     }
 
-    /// Check if a file URI is within any workspace root
-    /// Format documentation string for better readability
+    async fn send_repl(&self, request: ReplRequest) -> anyhow::Result<common_rust::ReplResponse> {
+        let client = Arc::clone(&self.master_repl);
+        tokio::task::spawn_blocking(move || client.blocking_write().send_request(request))
+            .await
+            .map_err(|e| anyhow::anyhow!("master REPL task failed: {e}"))?
+    }
+
     fn format_documentation(doc: &str) -> String {
         // Replace escaped tildes (~~) with single tildes (~)
         let mut text = doc.replace("~~", "~");
@@ -621,20 +621,8 @@ impl LanguageServer for LispLspBackend {
             info!("Workspace root: {:?}", root_uri);
         }
 
-        // Start master REPL if needed (async, non-blocking)
-        let repl = self.master_repl.read().await;
-
-        // Quick ping with 100ms timeout
-        info!("Quick ping to check if master REPL is running...");
-        if !repl.is_connected() {
-            info!("Master REPL not responding, starting in background...");
-            // Spawn REPL asynchronously without waiting
-            repl.try_start_master_repl();
-            info!("Master REPL spawn initiated (will be ready soon)");
-        } else {
-            info!("Master REPL is already running");
-        }
-        drop(repl);
+        info!("Ensuring master REPL is running...");
+        self.master_repl.read().await.try_start_master_repl();
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -835,9 +823,7 @@ impl LanguageServer for LispLspBackend {
             package: package_name,
         };
 
-        let mut repl = self.master_repl.write().await;
-        debug!("Sending request to master REPL");
-        match repl.send_request(request) {
+        match self.send_repl(request).await {
             Ok(response) => {
                 debug!("Got response from master REPL: {:?}", response);
 
@@ -993,8 +979,7 @@ impl LanguageServer for LispLspBackend {
             prefix: Some(symbol_prefix.unwrap_or(prefix.clone())),
         };
 
-        let mut repl = self.master_repl.write().await;
-        match repl.send_request(request) {
+        match self.send_repl(request).await {
             Ok(response) => {
                 // Convert response to CompletionItems
                 use common_rust::ResponseData;
@@ -1354,8 +1339,7 @@ impl LanguageServer for LispLspBackend {
 
                 self.client.log_message(MessageType::INFO, format!("Sending REPL request for symbol: {}", symbol_name)).await;
 
-                let mut repl = self.master_repl.write().await;
-                match repl.send_request(request) {
+                match self.send_repl(request).await {
                     Ok(response) => {
                         self.client.log_message(MessageType::INFO, "Got REPL response").await;
                         use common_rust::ResponseData;
@@ -1441,8 +1425,7 @@ impl LanguageServer for LispLspBackend {
 
         self.client.log_message(MessageType::INFO, format!("Sending REPL request for symbol: {}", symbol_name)).await;
 
-        let mut repl = self.master_repl.write().await;
-        match repl.send_request(request) {
+        match self.send_repl(request).await {
             Ok(response) => {
                 self.client.log_message(MessageType::INFO, "Got REPL response").await;
                 use common_rust::ResponseData;

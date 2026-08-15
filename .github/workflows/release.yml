@@ -1,0 +1,39 @@
+name: Release binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: target
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            asset: zed-cl-macos-aarch64.zip
+          - os: macos-15-intel
+            asset: zed-cl-macos-x86_64.zip
+          - os: ubuntu-latest
+            asset: zed-cl-linux-x86_64.zip
+          - os: windows-latest
+            asset: zed-cl-windows-x86_64.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-native
+        with:
+          asset: ${{ matrix.asset }}
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true

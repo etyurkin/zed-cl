@@ -6,8 +6,8 @@
     "{connection_file}"
   ],
   "env": {
-    "ZED_CL_MASTER_REPL_ENDPOINT": "tcp://127.0.0.1:5555",
-    "RUST_LOG": "debug"
+    "RUST_LOG": "info",
+    "ZED_CL_EXTENSION_DIR": "EXTENSION_DIR_PLACEHOLDER"
   },
   "interrupt_mode": "message",
   "metadata": {

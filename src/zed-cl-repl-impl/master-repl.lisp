@@ -573,9 +573,9 @@
   (handle-request stream message))
 
 (defun start-master-repl ()
-  "Start the master REPL server with Unix socket"
+  "Start the master REPL TCP server on 127.0.0.1"
   (log-error "========================================")
-  (log-error "Master REPL Server (Unix Socket)")
+  (log-error "Master REPL Server (TCP 127.0.0.1)")
   (log-error "Shared environment for all kernels")
   (log-error "========================================")
   (zed-cl.socket-server:start-socket-server #'message-handler))

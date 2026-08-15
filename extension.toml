@@ -4,7 +4,7 @@ version = "0.0.1"
 schema_version = 1
 authors = ["Evgeniy Tyurkin <etyurkin@icloud.com>"]
 description = "Common Lisp support for Zed"
-repository = "https://github.com/your-username/zed-commonlisp"
+repository = "https://github.com/etyurkin/zed-cl"
 
 [grammars.commonlisp]
 repository = "https://github.com/tree-sitter-grammars/tree-sitter-commonlisp"

@@ -10,26 +10,25 @@ Common Lisp language support for the Zed editor with integrated LSP server and J
 - **Interactive REPL**: Built-in REPL with `Ctrl+Shift+Enter`, shared state across files
 - **Rich Output**: Display markdown, tables, images, and JSON inline
 - **Jupyter Compatible**: Optional Jupyter Lab/Notebook support
-- **Cross-Platform**: Works on macOS and Linux (not tested)
+- **Cross-Platform**: macOS, Linux, and Windows
 
 ## Prerequisites
 
-**Required for all features:**
+1. **[Zed](https://zed.dev/download)**
+2. **SBCL** on PATH (`sbcl --version` must work in a new terminal). After installing on Windows, fully quit and reopen Zed so it inherits PATH.
+   - macOS: `brew install sbcl`
+   - Linux: `apt install sbcl` / `dnf install sbcl` / `pacman -S sbcl`
+   - Windows: [sbcl.org](http://www.sbcl.org/platform-table.html) (x86-64), or Scoop `scoop install sbcl`
 
-1. **Common Lisp Implementation** (one of):
-   - **SBCL** (recommended - full feature support):
-     - macOS: `brew install sbcl`
-     - Linux: `apt install sbcl` / `dnf install sbcl` / `pacman -S sbcl`
+ECL is optional (`lisp_impl` in `~/.zed-cl/config.json`) where `sb-bsd-sockets` is available.
 
-   - **ECL** (alternative - ~90% feature parity):
-     - macOS: `brew install ecl`
-     - Linux: `apt install ecl` / `dnf install ecl` / `pacman -S ecl`
+Quicklisp is optional. The REPL starts without it; `config.json` is used when `cl-json` is installed.
 
-   Configure your preferred implementation via `~/.zed-cl/config.json` (see Configuration section below).
+## Installation
 
-**Note:** Quicklisp and required dependencies will be installed automatically during the build process (`make build` or `make setup-quicklisp`).
+**From a GitHub release** (no Rust toolchain): install the extension in Zed. Native binaries are downloaded as `zed-cl-{macos|linux|windows}-{aarch64|x86_64}.zip`.
 
-## Development Installation
+**From source:**
 
 ```bash
 git clone https://github.com/etyurkin/zed-cl
@@ -37,10 +36,11 @@ cd zed-cl
 make build
 ```
 
-In Zed:
-1. Open command palette (`Cmd+Shift+P`)
-2. Run "zed: install dev extension"
-3. Select the cloned directory
+On Windows without Make, build the four crates with `cargo build --release --manifest-path src/zed-cl-lsp/Cargo.toml` (and kernel/index/repl), copy `*.exe` into `bin\`, then in Zed: command palette → `zed: install dev extension` → this directory.
+
+On macOS/Linux after `make build`, the same command palette step installs the clone.
+
+Open a `.lisp` file. Autocomplete and hover come from the language server. `Ctrl+Shift+Enter` evaluates the current form. If eval does not appear, run `repl: refresh kernelspecs`.
 
 ## Configuration
 
@@ -133,15 +133,13 @@ Open any `.lisp` file and get:
 
 All evaluations share a single REPL environment - definitions are automatically available in autocomplete.
 
-**Direct Terminal Connection (Advanced):**
-
-For debugging or advanced use, connect directly to the master REPL socket:
+**Direct terminal connection (advanced):**
 
 ```bash
-./scripts/connect-repl.sh
+sbcl --script scripts/connect-repl.lisp
 ```
 
-This connects via Unix domain socket to the shared REPL using the configured Lisp implementation.
+This connects over TCP (`127.0.0.1`) to the shared master REPL. On Unix, `./scripts/connect-repl.sh` wraps the same script with optional `rlwrap`.
 
 ## Building a System Index (Optional)
 
@@ -352,12 +350,13 @@ pkill -9 -f 'zed-cl-kernel' && pkill -9 -f 'zed-cl-lsp' && pkill -9 -f 'master-r
 ## Log Locations
 
 **LSP Server:**
-- `/tmp/cl-zed-lsp.log` - LSP debug logs
-- `/tmp/master-repl.log` - Master REPL logs
+- `~/.zed-cl/logs/lsp.log` - LSP debug logs
+- `~/.zed-cl/logs/master-repl.log` - Master REPL logs
 
 **Zed Application:**
 - `~/Library/Logs/Zed/Zed.log` (macOS)
 - `~/.local/share/zed/logs/Zed.log` (Linux)
+- `%LOCALAPPDATA%\Zed\logs\Zed.log` (Windows)
 
 **Database Indexes:**
 - `~/.zed-cl/system-index.db` - System libraries (SBCL + manually indexed packages)
@@ -368,7 +367,7 @@ pkill -9 -f 'zed-cl-kernel' && pkill -9 -f 'zed-cl-lsp' && pkill -9 -f 'master-r
 ```
       ┌───────────────────────┐
       │  Master REPL Process  │
-      │ (Unix domain sockets) │
+      │   (TCP 127.0.0.1)     │
       └──────────┬────────────┘
                  │
        ┌─────────┼──────────┐
@@ -379,7 +378,7 @@ pkill -9 -f 'zed-cl-kernel' && pkill -9 -f 'zed-cl-lsp' && pkill -9 -f 'master-r
    └───────┘  └──────┘  └───────┘
 ```
 
-All components connect to a single master REPL via Unix domain sockets for true state sharing. Code evaluated in any component is immediately available in all others.
+All components connect to a single master REPL over TCP on localhost. Code evaluated in any component is immediately available in all others.
 
 ## License
 
