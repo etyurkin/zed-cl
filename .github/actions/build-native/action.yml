@@ -16,7 +16,18 @@ runs:
     - name: Fetch tree-sitter grammar
       uses: ./.github/actions/fetch-grammar
     - name: Build native tools
+      if: runner.os != 'Windows'
       shell: bash
+      env:
+        CARGO_TARGET_DIR: target
+      run: |
+        cargo build --release --manifest-path src/zed-cl-lsp/Cargo.toml
+        cargo build --release --manifest-path src/zed-cl-kernel/Cargo.toml
+        cargo build --release --manifest-path src/zed-cl-index/Cargo.toml
+        cargo build --release --manifest-path src/zed-cl-repl/Cargo.toml
+    - name: Build native tools (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
       env:
         CARGO_TARGET_DIR: target
       run: |
