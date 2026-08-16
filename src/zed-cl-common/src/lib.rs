@@ -1,12 +1,9 @@
-/// Common Rust library for communicating with the SBCL master REPL
-///
-/// This library provides a Unix socket client that both the LSP server
-/// and Jupyter kernel use to communicate with the master REPL process.
+/// Common library for talking to the master Lisp REPL over TCP.
 
 mod config;
 mod master_repl;
 mod protocol;
 
-pub use config::Config;
-pub use master_repl::{MasterReplClient, get_socket_path};
+pub use config::{data_dir, home_dir, log_dir, Config, Profile, ReplConnection};
+pub use master_repl::{connection_file_path, MasterReplClient};
 pub use protocol::{DisplayData, ReplRequest, ReplResponse, ResponseData, SymbolInfo};

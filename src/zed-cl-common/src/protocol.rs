@@ -1,30 +1,28 @@
-/// Protocol definitions for communicating with the master REPL
+/// Protocol definitions for communicating with the master REPL.
 ///
-/// The master REPL accepts s-expression based requests over a Unix socket
-/// and returns s-expression responses.
+/// The master REPL accepts s-expression requests over TCP and returns
+/// s-expression responses.
 
+use anyhow::{Context, Result};
+use lexpr::Value;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use tracing::debug;
 
-/// Request types sent to master REPL
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ReplRequest {
-    /// Get information about a symbol
     SymbolInfo {
         id: String,
         symbol: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         package: Option<String>,
     },
-
-    /// List all symbols (optionally filtered by prefix)
     ListSymbols {
         id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         prefix: Option<String>,
     },
-
-    /// Evaluate Lisp code
     Eval {
         id: String,
         code: String,
@@ -37,35 +35,35 @@ pub enum ReplRequest {
         #[serde(skip_serializing_if = "Option::is_none")]
         file_character: Option<u32>,
     },
-
-    /// Load a file
     LoadFile {
         id: String,
         path: String,
     },
-
-    /// Set current file being edited (for source tracking)
     SetCurrentFile {
         id: String,
         path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        contents: Option<String>,
+    },
+    Ping {
+        id: String,
     },
 }
 
-/// Response from master REPL
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplResponse {
     pub id: String,
-
     #[serde(flatten)]
     pub data: ResponseData,
 }
 
-/// Response data variants
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ResponseData {
     SymbolInfo(SymbolInfo),
-    SymbolList { symbols: Vec<SymbolInfo> },
+    SymbolList {
+        symbols: Vec<SymbolInfo>,
+    },
     EvalResult {
         output: String,
         values: Vec<String>,
@@ -73,7 +71,6 @@ pub enum ResponseData {
         error: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         traceback: Option<String>,
-        /// Rich display data (MIME-typed outputs for Jupyter)
         #[serde(skip_serializing_if = "Option::is_none")]
         displays: Option<Vec<DisplayData>>,
     },
@@ -82,79 +79,102 @@ pub enum ResponseData {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    Error { error: String },
+    Error {
+        error: String,
+    },
+    Pong,
 }
 
-/// Rich display data for Jupyter (images, HTML, tables, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DisplayData {
-    /// MIME type -> data mapping
-    /// Examples: "text/html", "image/png", "application/json", "text/markdown"
-    pub data: std::collections::HashMap<String, String>,
-
-    /// Optional metadata for the display
+    pub data: HashMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 }
 
-/// Information about a Lisp symbol
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolInfo {
     pub symbol: String,
     pub package: String,
-    pub kind: String, // "function", "variable", "class", etc.
-
+    pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc: Option<String>,
-
     #[serde(skip_serializing_if = "Option::is_none", rename = "param-types")]
     pub param_types: Option<Vec<(String, Option<String>)>>,
-
     #[serde(skip_serializing_if = "Option::is_none", rename = "source-file")]
     pub source_file: Option<String>,
-
     #[serde(skip_serializing_if = "Option::is_none", rename = "source-line")]
     pub source_line: Option<u32>,
-
     #[serde(skip_serializing_if = "Option::is_none", rename = "source-character")]
     pub source_character: Option<u32>,
 }
 
 impl ReplRequest {
-    /// Convert request to s-expression string for sending to REPL
+    pub fn id(&self) -> &str {
+        match self {
+            ReplRequest::SymbolInfo { id, .. }
+            | ReplRequest::ListSymbols { id, .. }
+            | ReplRequest::Eval { id, .. }
+            | ReplRequest::LoadFile { id, .. }
+            | ReplRequest::SetCurrentFile { id, .. }
+            | ReplRequest::Ping { id } => id,
+        }
+    }
+
+    pub fn id_mut(&mut self) -> &mut String {
+        match self {
+            ReplRequest::SymbolInfo { id, .. }
+            | ReplRequest::ListSymbols { id, .. }
+            | ReplRequest::Eval { id, .. }
+            | ReplRequest::LoadFile { id, .. }
+            | ReplRequest::SetCurrentFile { id, .. }
+            | ReplRequest::Ping { id } => id,
+        }
+    }
+
     pub fn to_sexp(&self) -> String {
         match self {
             ReplRequest::SymbolInfo { id, symbol, package } => {
-                if let Some(pkg) = package {
-                    format!("(:type \"symbol-info\" :id \"{}\" :symbol \"{}\" :package \"{}\")",
-                           id, symbol, pkg)
-                } else {
-                    format!("(:type \"symbol-info\" :id \"{}\" :symbol \"{}\")", id, symbol)
-                }
-            }
-            ReplRequest::ListSymbols { id, prefix } => {
-                if let Some(pfx) = prefix {
-                    format!("(:type \"list-symbols\" :id \"{}\" :prefix \"{}\")", id, pfx)
-                } else {
-                    format!("(:type \"list-symbols\" :id \"{}\")", id)
-                }
-            }
-            ReplRequest::Eval { id, code, package, file_path, file_line, file_character } => {
-                let escaped_code = code.replace("\\", "\\\\").replace("\"", "\\\"");
                 let mut parts = vec![
-                    format!(":type \"eval\""),
-                    format!(":id \"{}\"", id),
-                    format!(":code \"{}\"", escaped_code),
+                    ":type \"symbol-info\"".to_string(),
+                    format!(":id {}", lisp_string(id)),
+                    format!(":symbol {}", lisp_string(symbol)),
                 ];
                 if let Some(pkg) = package {
-                    parts.push(format!(":package \"{}\"", pkg));
+                    parts.push(format!(":package {}", lisp_string(pkg)));
+                }
+                format!("({})", parts.join(" "))
+            }
+            ReplRequest::ListSymbols { id, prefix } => {
+                let mut parts = vec![
+                    ":type \"list-symbols\"".to_string(),
+                    format!(":id {}", lisp_string(id)),
+                ];
+                if let Some(pfx) = prefix {
+                    parts.push(format!(":prefix {}", lisp_string(pfx)));
+                }
+                format!("({})", parts.join(" "))
+            }
+            ReplRequest::Eval {
+                id,
+                code,
+                package,
+                file_path,
+                file_line,
+                file_character,
+            } => {
+                let mut parts = vec![
+                    ":type \"eval\"".to_string(),
+                    format!(":id {}", lisp_string(id)),
+                    format!(":code {}", lisp_string(code)),
+                ];
+                if let Some(pkg) = package {
+                    parts.push(format!(":package {}", lisp_string(pkg)));
                 }
                 if let Some(path) = file_path {
-                    let escaped_path = path.replace("\\", "\\\\").replace("\"", "\\\"");
-                    parts.push(format!(":file-path \"{}\"", escaped_path));
+                    parts.push(format!(":file-path {}", lisp_string(path)));
                 }
                 if let Some(line) = file_line {
                     parts.push(format!(":file-line {}", line));
@@ -165,12 +185,342 @@ impl ReplRequest {
                 format!("({})", parts.join(" "))
             }
             ReplRequest::LoadFile { id, path } => {
-                format!("(:type \"load-file\" :id \"{}\" :path \"{}\")", id, path)
+                format!(
+                    "(:type \"load-file\" :id {} :path {})",
+                    lisp_string(id),
+                    lisp_string(path)
+                )
             }
-            ReplRequest::SetCurrentFile { id, path } => {
-                let escaped_path = path.replace("\\", "\\\\").replace("\"", "\\\"");
-                format!("(:type \"set-current-file\" :id \"{}\" :path \"{}\")", id, escaped_path)
+            ReplRequest::SetCurrentFile { id, path, contents } => {
+                let mut parts = vec![
+                    ":type \"set-current-file\"".to_string(),
+                    format!(":id {}", lisp_string(id)),
+                    format!(":path {}", lisp_string(path)),
+                ];
+                if let Some(text) = contents {
+                    parts.push(format!(":contents {}", lisp_string(text)));
+                }
+                format!("({})", parts.join(" "))
+            }
+            ReplRequest::Ping { id } => {
+                format!("(:type \"ping\" :id {})", lisp_string(id))
             }
         }
+    }
+}
+
+fn lisp_string(s: &str) -> String {
+    format!("\"{}\"", escape_lisp_string(s))
+}
+
+fn escape_lisp_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+impl ReplResponse {
+    pub fn from_sexp(sexp: &str, expected_id: &str) -> Result<Self> {
+        debug!("Parsing s-expression: {}", sexp);
+        let value = lexpr::from_str(sexp).context("Failed to parse s-expression")?;
+        let map = plist_map(&value)?;
+
+        let id = map
+            .get("ID")
+            .and_then(value_as_string)
+            .unwrap_or_else(|| expected_id.to_string());
+
+        if map.contains_key("PONG") || map.contains_key("OK") {
+            return Ok(ReplResponse {
+                id,
+                data: ResponseData::Pong,
+            });
+        }
+
+        if let Some(error) = map.get("ERROR").and_then(value_as_string) {
+            if !map.contains_key("OUTPUT") {
+                return Ok(ReplResponse {
+                    id,
+                    data: ResponseData::Error { error },
+                });
+            }
+        }
+
+        if map.contains_key("SYMBOL") {
+            return Ok(ReplResponse {
+                id,
+                data: ResponseData::SymbolInfo(symbol_from_map(&map)),
+            });
+        }
+
+        if map.contains_key("SYMBOLS") {
+            let symbols = map
+                .get("SYMBOLS")
+                .map(extract_symbol_list)
+                .unwrap_or_default();
+            return Ok(ReplResponse {
+                id,
+                data: ResponseData::SymbolList { symbols },
+            });
+        }
+
+        if map.contains_key("OUTPUT") || map.contains_key("VALUES") {
+            let output = map
+                .get("OUTPUT")
+                .and_then(value_as_string)
+                .unwrap_or_default();
+            let values = map
+                .get("VALUES")
+                .map(value_as_string_list)
+                .unwrap_or_default();
+            let error = map
+                .get("ERROR")
+                .and_then(value_as_string)
+                .filter(|s| !s.is_empty());
+            let traceback = map
+                .get("TRACEBACK")
+                .and_then(value_as_string)
+                .filter(|s| !s.is_empty());
+            let displays = map.get("DISPLAYS").and_then(extract_displays);
+
+            return Ok(ReplResponse {
+                id,
+                data: ResponseData::EvalResult {
+                    output,
+                    values,
+                    error,
+                    traceback,
+                    displays,
+                },
+            });
+        }
+
+        anyhow::bail!("Unknown response format: {:?}", map.keys().collect::<Vec<_>>())
+    }
+}
+
+fn plist_map(value: &Value) -> Result<HashMap<String, Value>> {
+    let items = value
+        .to_vec()
+        .context("Expected a property list")?;
+    let mut map = HashMap::new();
+    let mut i = 0;
+    while i + 1 < items.len() {
+        if let Some(key) = keyword_name(&items[i]) {
+            map.insert(key, items[i + 1].clone());
+        }
+        i += 2;
+    }
+    Ok(map)
+}
+
+fn keyword_name(value: &Value) -> Option<String> {
+    value
+        .as_keyword()
+        .map(|s| s.to_uppercase())
+        .or_else(|| {
+            value.as_symbol().map(|s| {
+                s.trim_start_matches(':').to_uppercase()
+            })
+        })
+}
+
+fn value_as_string(value: &Value) -> Option<String> {
+    if value.is_nil() || value.is_null() {
+        return None;
+    }
+    if let Some(sym) = value.as_symbol() {
+        if sym.eq_ignore_ascii_case("nil") {
+            return None;
+        }
+        if sym.eq_ignore_ascii_case("t") {
+            return Some("T".to_string());
+        }
+    }
+    if let Some(s) = value.as_str() {
+        return Some(unescape_lisp_string(s));
+    }
+    if let Some(n) = value.as_i64() {
+        return Some(n.to_string());
+    }
+    if let Some(n) = value.as_u64() {
+        return Some(n.to_string());
+    }
+    if let Some(n) = value.as_f64() {
+        return Some(n.to_string());
+    }
+    if value == &Value::symbol("T") || value == &Value::Bool(true) {
+        return Some("T".to_string());
+    }
+    Some(value.to_string())
+}
+
+fn unescape_lisp_string(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                result.push(next);
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+fn value_as_string_list(value: &Value) -> Vec<String> {
+    if value.is_nil() {
+        return Vec::new();
+    }
+    if let Some(items) = value.to_vec() {
+        return items.iter().filter_map(value_as_string).collect();
+    }
+    Vec::new()
+}
+
+fn symbol_from_map(map: &HashMap<String, Value>) -> SymbolInfo {
+    SymbolInfo {
+        symbol: map.get("SYMBOL").and_then(value_as_string).unwrap_or_default(),
+        package: map.get("PACKAGE").and_then(value_as_string).unwrap_or_default(),
+        kind: map.get("KIND").and_then(value_as_string).unwrap_or_default(),
+        source: map.get("SOURCE").and_then(value_as_string),
+        doc: map.get("DOC").and_then(value_as_string),
+        param_types: map.get("PARAM-TYPES").and_then(parse_param_types),
+        source_file: map.get("SOURCE-FILE").and_then(value_as_string),
+        source_line: map
+            .get("SOURCE-LINE")
+            .and_then(value_as_string)
+            .and_then(|s| s.parse().ok()),
+        source_character: map
+            .get("SOURCE-CHARACTER")
+            .and_then(value_as_string)
+            .and_then(|s| s.parse().ok()),
+    }
+}
+
+fn extract_symbol_list(value: &Value) -> Vec<SymbolInfo> {
+    if value.is_nil() {
+        return Vec::new();
+    }
+    let Some(items) = value.to_vec() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| plist_map(item).ok().map(|m| symbol_from_map(&m)))
+        .collect()
+}
+
+fn extract_displays(value: &Value) -> Option<Vec<DisplayData>> {
+    if value.is_nil() {
+        return None;
+    }
+    let items = value.to_vec()?;
+    let mut displays = Vec::new();
+    for item in items {
+        if let Ok(map) = plist_map(&item) {
+            if let Some(data_val) = map.get("DATA") {
+                displays.push(DisplayData {
+                    data: parse_alist(data_val),
+                    metadata: None,
+                });
+            }
+        }
+    }
+    if displays.is_empty() {
+        None
+    } else {
+        Some(displays)
+    }
+}
+
+fn parse_alist(value: &Value) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Some(items) = value.to_vec() else {
+        return map;
+    };
+    for item in items {
+        if let Value::Cons(cons) = &item {
+            let car = cons.car();
+            let cdr = cons.cdr();
+            if let Some(key) = value_as_string(car) {
+                if let Some(val) = value_as_string(cdr) {
+                    if val != "NIL" {
+                        map.insert(key, val);
+                    }
+                }
+            }
+        } else if let Some(pair) = item.to_vec() {
+            if pair.len() >= 2 {
+                if let (Some(key), Some(val)) = (value_as_string(&pair[0]), value_as_string(&pair[1])) {
+                    if val != "NIL" {
+                        map.insert(key, val);
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
+fn parse_param_types(value: &Value) -> Option<Vec<(String, Option<String>)>> {
+    if value.is_nil() {
+        return Some(Vec::new());
+    }
+    let items = value.to_vec()?;
+    let mut result = Vec::new();
+    for item in items {
+        let (name, type_val) = if let Value::Cons(cons) = &item {
+            (value_as_string(cons.car()), value_as_string(cons.cdr()))
+        } else if let Some(pair) = item.to_vec() {
+            if pair.len() >= 2 {
+                (value_as_string(&pair[0]), value_as_string(&pair[1]))
+            } else {
+                continue;
+            }
+        } else {
+            continue;
+        };
+        if let Some(name) = name {
+            let type_val = type_val.filter(|s| s != "NIL" && !s.is_empty());
+            result.push((name, type_val));
+        }
+    }
+    Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_eval_result() {
+        let sexp = r#"(:ID "1" :OUTPUT "hi" :VALUES ("3") :ERROR NIL)"#;
+        let response = ReplResponse::from_sexp(sexp, "1").unwrap();
+        match response.data {
+            ResponseData::EvalResult { output, values, error, .. } => {
+                assert_eq!(output, "hi");
+                assert_eq!(values, vec!["3"]);
+                assert!(error.is_none());
+            }
+            other => panic!("unexpected {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_ping() {
+        let sexp = r#"(:ID "p" :PONG T)"#;
+        let response = ReplResponse::from_sexp(sexp, "p").unwrap();
+        assert!(matches!(response.data, ResponseData::Pong));
+    }
+
+    #[test]
+    fn escapes_windows_paths_and_quotes() {
+        let request = ReplRequest::LoadFile {
+            id: "1".into(),
+            path: r#"C:\Users\a\"file\".lisp"#.into(),
+        };
+        let sexp = request.to_sexp();
+        assert!(sexp.contains(r#"C:\\Users\\a\\\"file\\\".lisp"#));
     }
 }

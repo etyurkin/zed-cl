@@ -1,0 +1,58 @@
+name: Build native zed-cl binaries
+description: Fetch grammar, compile native tools, zip platform assets
+
+inputs:
+  asset:
+    required: true
+    description: Output zip name (e.g. zed-cl-windows-x86_64.zip)
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+    - name: Enable MSVC (tree-sitter C)
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
+    - name: Fetch tree-sitter grammar
+      uses: ./.github/actions/fetch-grammar
+    - name: Build native tools
+      if: runner.os != 'Windows'
+      shell: bash
+      env:
+        CARGO_TARGET_DIR: target
+      run: |
+        cargo build --release --manifest-path src/zed-cl-lsp/Cargo.toml
+        cargo build --release --manifest-path src/zed-cl-kernel/Cargo.toml
+        cargo build --release --manifest-path src/zed-cl-index/Cargo.toml
+        cargo build --release --manifest-path src/zed-cl-repl/Cargo.toml
+    - name: Build native tools (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        CARGO_TARGET_DIR: target
+      run: |
+        cargo build --release --manifest-path src/zed-cl-lsp/Cargo.toml
+        cargo build --release --manifest-path src/zed-cl-kernel/Cargo.toml
+        cargo build --release --manifest-path src/zed-cl-index/Cargo.toml
+        cargo build --release --manifest-path src/zed-cl-repl/Cargo.toml
+    - name: Pack binaries (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        mkdir -p dist
+        cp target/release/zed-cl-lsp dist/
+        cp target/release/zed-cl-kernel dist/
+        cp target/release/zed-cl-index dist/
+        cp target/release/zed-cl-repl dist/
+        (cd dist && zip -r "../${{ inputs.asset }}" .)
+    - name: Pack binaries (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force dist | Out-Null
+        Copy-Item target/release/zed-cl-lsp.exe dist/
+        Copy-Item target/release/zed-cl-kernel.exe dist/
+        Copy-Item target/release/zed-cl-index.exe dist/
+        Copy-Item target/release/zed-cl-repl.exe dist/
+        if (Test-Path ${{ inputs.asset }}) { Remove-Item ${{ inputs.asset }} }
+        Compress-Archive -Path dist\* -DestinationPath ${{ inputs.asset }}

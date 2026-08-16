@@ -5,11 +5,13 @@
 (defpackage :zed-cl.config
   (:use :cl)
   (:export
-   ;; Completion settings
    #:*completion-package-whitelist*
-   ;; Profile-based config
    #:get-active-profile
-   #:get-profile-setting))
+   #:get-profile-setting
+   #:data-dir
+   #:connection-file-path
+   #:write-connection-file
+   #:read-connection-file))
 
 (in-package :zed-cl.config)
 
@@ -26,10 +28,10 @@
 
 (defun read-config ()
   "Read and parse ~/.zed-cl/config.json"
-  (when (probe-file *config-path*)
+  (when (and (probe-file *config-path*) (find-package :cl-json))
     (handler-case
         (with-open-file (stream *config-path* :direction :input)
-          (cl-json:decode-json stream))
+          (funcall (find-symbol "DECODE-JSON" :cl-json) stream))
       (error (e)
         (format *error-output* "~&[Config] Error reading config: ~A~%" e)
         nil))))
@@ -64,6 +66,45 @@
       (setf active-profile (get-default-profile)))
     (or (cdr (assoc setting-name active-profile))
         default)))
+
+(defun data-dir ()
+  (merge-pathnames ".zed-cl/" (user-homedir-pathname)))
+
+(defun connection-file-path (&optional impl)
+  (merge-pathnames
+   (format nil "repl-~a.json"
+           (or impl (get-profile-setting :lisp--impl "sbcl")))
+   (data-dir)))
+
+(defun parse-connection-json (line)
+  (when line
+    (let ((host-pos (search "\"host\":" line))
+          (port-pos (search "\"port\":" line)))
+      (when (and host-pos port-pos)
+        (let* ((host-start (+ host-pos 8))
+               (host-end (position #\" line :start host-start))
+               (host (when host-end (subseq line host-start host-end)))
+               (port (parse-integer line :start (+ port-pos 7) :junk-allowed t)))
+          (when (and host port)
+            (cons host port)))))))
+
+(defun write-connection-file (host port)
+  (let* ((path (connection-file-path))
+         (tmp (pathname (concatenate 'string (namestring path) ".tmp"))))
+    (ensure-directories-exist path)
+    (with-open-file (out tmp :direction :output :if-exists :supersede
+                         :if-does-not-exist :create)
+      (format out "{\"host\":~S,\"port\":~D}~%" host port))
+    (when (probe-file path)
+      (delete-file path))
+    (rename-file tmp path)
+    path))
+
+(defun read-connection-file (&optional impl)
+  (let ((path (connection-file-path impl)))
+    (when (probe-file path)
+      (with-open-file (in path)
+        (parse-connection-json (read-line in nil nil))))))
 
 ;;;; Completion Configuration
 

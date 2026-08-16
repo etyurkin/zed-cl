@@ -10,7 +10,6 @@
   :description "Shared configuration for Zed-CL"
   :version "0.1.0"
   :license "MIT"
-  :depends-on ("cl-json")
   :components ((:file "config")))
 
 (defsystem "zed-cl/compat"

@@ -10,26 +10,67 @@ Common Lisp language support for the Zed editor with integrated LSP server and J
 - **Interactive REPL**: Built-in REPL with `Ctrl+Shift+Enter`, shared state across files
 - **Rich Output**: Display markdown, tables, images, and JSON inline
 - **Jupyter Compatible**: Optional Jupyter Lab/Notebook support
-- **Cross-Platform**: Works on macOS and Linux (not tested)
+- **Cross-Platform**: macOS, Linux, and Windows
 
 ## Prerequisites
 
-**Required for all features:**
+1. **[Zed](https://zed.dev/download)**
+2. **SBCL** on PATH (`sbcl --version` must work in a new terminal). After installing on Windows, fully quit and reopen Zed so it inherits PATH.
+   - macOS: `brew install sbcl`
+   - Linux: `apt install sbcl` / `dnf install sbcl` / `pacman -S sbcl`
+   - Windows: [sbcl.org](http://www.sbcl.org/platform-table.html) (x86-64), or Scoop `scoop install sbcl`
+3. **From source only:** [rustup](https://rustup.rs/) with `wasm32-wasip2` (`rustup target add wasm32-wasip2`). Zed loads the WASM `make` produces; it does not compile the extension itself.
 
-1. **Common Lisp Implementation** (one of):
-   - **SBCL** (recommended - full feature support):
-     - macOS: `brew install sbcl`
-     - Linux: `apt install sbcl` / `dnf install sbcl` / `pacman -S sbcl`
+ECL is optional (`lisp_impl` in `~/.zed-cl/config.json`) where `sb-bsd-sockets` is available.
 
-   - **ECL** (alternative - ~90% feature parity):
-     - macOS: `brew install ecl`
-     - Linux: `apt install ecl` / `dnf install ecl` / `pacman -S ecl`
+Quicklisp is optional. The REPL starts without it; `config.json` is used when `cl-json` is installed.
 
-   Configure your preferred implementation via `~/.zed-cl/config.json` (see Configuration section below).
+## Installation
 
-**Note:** Quicklisp and required dependencies will be installed automatically during the build process (`make build` or `make setup-quicklisp`).
+You need two things: the **Zed extension** (`extension.toml` + `extension.wasm` + `languages/`) and **native tools** (`zed-cl-lsp`, `zed-cl-kernel`, `zed-cl-index`, `zed-cl-repl`). Zed does not compile either.
 
-## Development Installation
+Pick your OS zip:
+
+| Machine | Native zip |
+|---|---|
+| macOS Apple Silicon | `zed-cl-macos-aarch64.zip` |
+| macOS Intel | `zed-cl-macos-x86_64.zip` |
+| Linux x86_64 | `zed-cl-linux-x86_64.zip` |
+| Windows x86_64 | `zed-cl-windows-x86_64.zip` |
+
+### From a GitHub Release (no Rust, no `make`)
+
+Use this after a tagged release (for example `v0.1.0`).
+
+1. Open [Releases](https://github.com/etyurkin/zed-cl/releases) and download:
+   - `zed-cl-extension.zip`
+   - the native zip for your machine (table above)
+2. Unzip `zed-cl-extension.zip` somewhere you will keep (Zed loads it from that path):
+   - macOS / Linux: `~/zed-cl-extension`
+   - Windows: `%USERPROFILE%\zed-cl-extension`
+3. Unzip the native tools into `~/.zed-cl/bin`:
+
+```bash
+mkdir -p ~/.zed-cl/bin
+unzip zed-cl-macos-aarch64.zip -d ~/.zed-cl/bin
+chmod +x ~/.zed-cl/bin/*
+```
+
+Windows (PowerShell):
+
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.zed-cl\bin" | Out-Null
+Expand-Archive -Force zed-cl-windows-x86_64.zip "$env:USERPROFILE\.zed-cl\bin"
+```
+
+4. In Zed: command palette (`Cmd+Shift+P` / `Ctrl+Shift+P`) → `zed: install dev extension` → select the unzipped **extension** folder (it must contain `extension.toml` and `extension.wasm`).
+5. Open a `.lisp` file. If the status bar shows a language-server error, run **Restart Server** on `zed-cl`. If eval does not appear, run `repl: refresh kernelspecs`.
+
+You can skip step 3: the extension downloads the native zip from the same release. If that fails, put the binaries in `~/.zed-cl/bin` as above.
+
+### From source
+
+Needs [rustup](https://rustup.rs/) with `wasm32-wasip2` (`rustup target add wasm32-wasip2`).
 
 ```bash
 git clone https://github.com/etyurkin/zed-cl
@@ -37,10 +78,9 @@ cd zed-cl
 make build
 ```
 
-In Zed:
-1. Open command palette (`Cmd+Shift+P`)
-2. Run "zed: install dev extension"
-3. Select the cloned directory
+Then in Zed: `zed: install dev extension` → this directory (the one with `extension.toml` and `extension.wasm`). `make` writes native tools to `~/.zed-cl/bin` and copies `extension.wasm` here.
+
+On Windows without Make, build the four native crates with `cargo build --release --manifest-path src/zed-cl-lsp/Cargo.toml` (and kernel/index/repl), copy `*.exe` into `bin\` and `%USERPROFILE%\.zed-cl\bin`, build the WASM crate with `cargo build --release --target wasm32-wasip2 --manifest-path src/zed-cl-extension/Cargo.toml`, copy `zed_commonlisp.wasm` to `extension.wasm`, then install this directory as above.
 
 ## Configuration
 
@@ -121,9 +161,17 @@ Open any `.lisp` file and get:
 
 **Inline evaluation:**
 1. Open a `.lisp` file
-2. Select code or position cursor in a form
-3. Press `Ctrl+Shift+Enter` to evaluate
+2. Put the cursor on a form, or select a complete form
+3. Press `Ctrl+Shift+Enter` (`repl: run`)
 4. See results inline
+
+Zed sends the current line (or the selection). If that line is an incomplete `defun`, the REPL reads **one** top-level form from the file.
+
+**Example files** (shared REPL — eval definitions, then call them from another buffer):
+- `examples/common-lisp-examples.lisp` — functions in `CL-USER`
+- `examples/my-utils.lisp` — package `MY-UTILS`; eval this before `my-utils:` calls
+- `examples/using-shared-repl.lisp` — call those definitions from another file
+- `examples/rich-output-examples.lisp` — markdown, tables, images
 
 **Terminal REPL (for development):**
 1. Open command palette (`Cmd+Shift+P`)
@@ -133,15 +181,13 @@ Open any `.lisp` file and get:
 
 All evaluations share a single REPL environment - definitions are automatically available in autocomplete.
 
-**Direct Terminal Connection (Advanced):**
-
-For debugging or advanced use, connect directly to the master REPL socket:
+**Direct terminal connection (advanced):**
 
 ```bash
-./scripts/connect-repl.sh
+sbcl --script scripts/connect-repl.lisp
 ```
 
-This connects via Unix domain socket to the shared REPL using the configured Lisp implementation.
+This connects over TCP (`127.0.0.1`) to the shared master REPL. On Unix, `./scripts/connect-repl.sh` wraps the same script with optional `rlwrap`.
 
 ## Building a System Index (Optional)
 
@@ -149,7 +195,7 @@ Goto-definition works out-of-the-box for your workspace code. To enable goto-def
 
 ### Quick Start
 
-The extension bundles an indexer tool at `~/.zed/extensions/installed/zed-cl/<version>/bin/zed-cl-index`.
+After `make build`, the indexer is `~/.zed-cl/bin/zed-cl-index` (also `bin/zed-cl-index` in the clone).
 
 **For SBCL users - index SBCL sources:**
 ```bash
@@ -157,7 +203,7 @@ The extension bundles an indexer tool at `~/.zed/extensions/installed/zed-cl/<ve
 make build-system-index
 
 # Or manually
-~/.zed/extensions/installed/zed-cl/<version>/bin/zed-cl-index \
+~/.zed-cl/bin/zed-cl-index \
   --source-dir /path/to/sbcl/src/code \
   --output ~/.zed-cl/system-index.db \
   --default-package COMMON-LISP
@@ -322,7 +368,7 @@ make clean          # Clean build artifacts
 make help           # Show all commands
 ```
 
-### Process Management
+### Process Management (Unix)
 
 **List running processes:**
 ```bash
@@ -352,12 +398,13 @@ pkill -9 -f 'zed-cl-kernel' && pkill -9 -f 'zed-cl-lsp' && pkill -9 -f 'master-r
 ## Log Locations
 
 **LSP Server:**
-- `/tmp/cl-zed-lsp.log` - LSP debug logs
-- `/tmp/master-repl.log` - Master REPL logs
+- `~/.zed-cl/logs/lsp.log` - LSP debug logs
+- `~/.zed-cl/logs/master-repl.log` - Master REPL logs
 
 **Zed Application:**
 - `~/Library/Logs/Zed/Zed.log` (macOS)
 - `~/.local/share/zed/logs/Zed.log` (Linux)
+- `%LOCALAPPDATA%\Zed\logs\Zed.log` (Windows)
 
 **Database Indexes:**
 - `~/.zed-cl/system-index.db` - System libraries (SBCL + manually indexed packages)
@@ -368,7 +415,7 @@ pkill -9 -f 'zed-cl-kernel' && pkill -9 -f 'zed-cl-lsp' && pkill -9 -f 'master-r
 ```
       ┌───────────────────────┐
       │  Master REPL Process  │
-      │ (Unix domain sockets) │
+      │   (TCP 127.0.0.1)     │
       └──────────┬────────────┘
                  │
        ┌─────────┼──────────┐
@@ -379,7 +426,7 @@ pkill -9 -f 'zed-cl-kernel' && pkill -9 -f 'zed-cl-lsp' && pkill -9 -f 'master-r
    └───────┘  └──────┘  └───────┘
 ```
 
-All components connect to a single master REPL via Unix domain sockets for true state sharing. Code evaluated in any component is immediately available in all others.
+All components connect to a single master REPL over TCP on localhost. Code evaluated in any component is immediately available in all others.
 
 ## License
 

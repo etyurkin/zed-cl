@@ -2,12 +2,11 @@
 
 use common_rust::{MasterReplClient, ReplRequest};
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
 use tracing::{debug, error, info};
-use zeromq::{Socket, SocketSend};
 
 use crate::document::DocumentTracker;
 use crate::symbol_extractor::TreeSitterExtractor;
@@ -21,17 +20,11 @@ pub struct LispLspBackend {
     symbol_index: SharedSymbolIndex,
     user_index: Arc<RwLock<UserIndexManager>>,
     workspace_roots: Arc<RwLock<Vec<Url>>>,
-    shutdown_tx: Option<mpsc::UnboundedSender<()>>,
 }
 
 impl LispLspBackend {
-    pub fn new(
-        client: Client,
-        endpoint: String,
-    ) -> Self {
-        // Use ~/.zed-cl/ for databases
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let db_dir = std::path::PathBuf::from(home).join(".zed-cl");
+    pub fn new(client: Client) -> Self {
+        let db_dir = common_rust::data_dir();
 
         // Get system index name from profile config
         let profile = common_rust::Config::get();
@@ -61,48 +54,36 @@ impl LispLspBackend {
         // Create user index manager
         let user_index = Arc::new(RwLock::new(UserIndexManager::new(user_index_path)));
 
-        // Create shutdown broadcast channel and spawn background thread with ZMQ PUB socket
-        // The socket must be bound BEFORE kernels start, so they can connect to it
-        let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel::<()>();
-
-        tokio::spawn(async move {
-            let mut socket = zeromq::PubSocket::new();
-            match socket.bind("tcp://127.0.0.1:5557").await {
-                Ok(_) => {
-                    info!("Shutdown broadcast socket bound to tcp://127.0.0.1:5557");
-
-                    // Wait for shutdown signal
-                    shutdown_rx.recv().await;
-
-                    info!("Received shutdown signal, broadcasting to kernels...");
-                    let msg = zeromq::ZmqMessage::from("SHUTDOWN".as_bytes().to_vec());
-                    if let Err(e) = socket.send(msg).await {
-                        error!("Failed to send shutdown broadcast: {}", e);
-                    } else {
-                        info!("Shutdown broadcast sent");
-                        // Give kernels time to receive
-                        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to bind shutdown broadcast socket: {}", e);
-                }
-            }
-        });
-
         Self {
             client,
-            master_repl: Arc::new(RwLock::new(MasterReplClient::new(endpoint))),
+            master_repl: Arc::new(RwLock::new(MasterReplClient::new())),
             documents: Arc::new(RwLock::new(DocumentTracker::new())),
             symbol_index,
             user_index,
             workspace_roots: Arc::new(RwLock::new(Vec::new())),
-            shutdown_tx: Some(shutdown_tx),
         }
     }
 
-    /// Check if a file URI is within any workspace root
-    /// Format documentation string for better readability
+    async fn send_repl(&self, request: ReplRequest) -> anyhow::Result<common_rust::ReplResponse> {
+        let client = Arc::clone(&self.master_repl);
+        tokio::task::spawn_blocking(move || client.blocking_write().send_request(request))
+            .await
+            .map_err(|e| anyhow::anyhow!("master REPL task failed: {e}"))?
+    }
+
+    async fn notify_repl_file(&self, uri: &Url) {
+        let Ok(path) = uri.to_file_path() else {
+            return;
+        };
+        let _ = self
+            .send_repl(ReplRequest::SetCurrentFile {
+                id: String::new(),
+                path: path.to_string_lossy().into_owned(),
+                contents: None,
+            })
+            .await;
+    }
+
     fn format_documentation(doc: &str) -> String {
         // Replace escaped tildes (~~) with single tildes (~)
         let mut text = doc.replace("~~", "~");
@@ -603,6 +584,26 @@ impl LispLspBackend {
             },
         })
     }
+
+    fn hover_from_buffer(text: &str, position: Position, symbol_name: &str) -> Option<Hover> {
+        let mut extractor = TreeSitterExtractor::new().ok()?;
+        let form = extractor.enclosing_form(text, position)?;
+        let form = form.trim();
+        if form.is_empty() {
+            return None;
+        }
+        Some(Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!(
+                    "**{}** _buffer_\n\nNot loaded in the REPL. Select this whole form, then `repl: run` (Ctrl+Shift+Enter).\n\n```lisp\n{}\n```\n",
+                    symbol_name,
+                    form
+                ),
+            }),
+            range: None,
+        })
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -621,20 +622,8 @@ impl LanguageServer for LispLspBackend {
             info!("Workspace root: {:?}", root_uri);
         }
 
-        // Start master REPL if needed (async, non-blocking)
-        let repl = self.master_repl.read().await;
-
-        // Quick ping with 100ms timeout
-        info!("Quick ping to check if master REPL is running...");
-        if !repl.is_connected() {
-            info!("Master REPL not responding, starting in background...");
-            // Spawn REPL asynchronously without waiting
-            repl.try_start_master_repl();
-            info!("Master REPL spawn initiated (will be ready soon)");
-        } else {
-            info!("Master REPL is already running");
-        }
-        drop(repl);
+        info!("Ensuring master REPL is running...");
+        self.master_repl.read().await.try_start_master_repl();
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -671,18 +660,6 @@ impl LanguageServer for LispLspBackend {
 
     async fn shutdown(&self) -> Result<()> {
         info!("Shutting down LSP server");
-
-        // Signal the background thread to broadcast shutdown
-        if let Some(ref tx) = self.shutdown_tx {
-            if let Err(e) = tx.send(()) {
-                error!("Failed to send shutdown signal to broadcast thread: {}", e);
-            } else {
-                info!("Shutdown signal sent to broadcast thread");
-                // Give time for broadcast to complete
-                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-            }
-        }
-
         Ok(())
     }
 
@@ -695,6 +672,8 @@ impl LanguageServer for LispLspBackend {
             .write()
             .await
             .open(params.text_document.uri, text.clone());
+
+        self.notify_repl_file(&uri).await;
 
         // Only index files within workspace (skip external files like SBCL sources)
         if !self.is_workspace_file(&uri).await {
@@ -724,6 +703,8 @@ impl LanguageServer for LispLspBackend {
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         debug!("Document saved: {}", uri);
+
+        self.notify_repl_file(&uri).await;
 
         // Only index files within workspace (skip external files like SBCL sources)
         if !self.is_workspace_file(&uri).await {
@@ -762,6 +743,7 @@ impl LanguageServer for LispLspBackend {
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
+        self.notify_repl_file(&uri).await;
 
         // Log to Zed's UI so we can see it
         self.client
@@ -835,9 +817,7 @@ impl LanguageServer for LispLspBackend {
             package: package_name,
         };
 
-        let mut repl = self.master_repl.write().await;
-        debug!("Sending request to master REPL");
-        match repl.send_request(request) {
+        match self.send_repl(request).await {
             Ok(response) => {
                 debug!("Got response from master REPL: {:?}", response);
 
@@ -892,7 +872,7 @@ impl LanguageServer for LispLspBackend {
                     }
                     ResponseData::Error { error } => {
                         debug!("Master REPL returned error: {}", error);
-                        Ok(None)
+                        Ok(Self::hover_from_buffer(text, position, &symbol_name))
                     }
                     _ => {
                         debug!("Unexpected response type");
@@ -902,7 +882,7 @@ impl LanguageServer for LispLspBackend {
             }
             Err(e) => {
                 error!("Failed to query master REPL: {}", e);
-                Ok(None)
+                Ok(Self::hover_from_buffer(text, position, &symbol_name))
             }
         }
     }
@@ -993,8 +973,7 @@ impl LanguageServer for LispLspBackend {
             prefix: Some(symbol_prefix.unwrap_or(prefix.clone())),
         };
 
-        let mut repl = self.master_repl.write().await;
-        match repl.send_request(request) {
+        match self.send_repl(request).await {
             Ok(response) => {
                 // Convert response to CompletionItems
                 use common_rust::ResponseData;
@@ -1354,8 +1333,7 @@ impl LanguageServer for LispLspBackend {
 
                 self.client.log_message(MessageType::INFO, format!("Sending REPL request for symbol: {}", symbol_name)).await;
 
-                let mut repl = self.master_repl.write().await;
-                match repl.send_request(request) {
+                match self.send_repl(request).await {
                     Ok(response) => {
                         self.client.log_message(MessageType::INFO, "Got REPL response").await;
                         use common_rust::ResponseData;
@@ -1441,8 +1419,7 @@ impl LanguageServer for LispLspBackend {
 
         self.client.log_message(MessageType::INFO, format!("Sending REPL request for symbol: {}", symbol_name)).await;
 
-        let mut repl = self.master_repl.write().await;
-        match repl.send_request(request) {
+        match self.send_repl(request).await {
             Ok(response) => {
                 self.client.log_message(MessageType::INFO, "Got REPL response").await;
                 use common_rust::ResponseData;

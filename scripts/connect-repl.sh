@@ -1,5 +1,5 @@
 #!/bin/bash
-# Connect to the master REPL via Unix domain socket
+# Connect to the master REPL over TCP localhost (optional rlwrap wrapper)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 

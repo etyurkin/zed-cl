@@ -12,8 +12,7 @@ use ratatui::{
     Terminal,
 };
 use std::io;
-use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
+use common_rust::{MasterReplClient, ReplRequest, ResponseData};
 
 enum LineType {
     Input,
@@ -35,7 +34,7 @@ struct App {
     scroll_offset: usize,  // Manual scroll offset
     visible_height: usize,  // Visible screen height (updated during render)
     request_counter: u32,
-    socket: UnixStream,
+    repl: MasterReplClient,
 }
 
 impl App {
@@ -80,15 +79,9 @@ impl App {
         let config = common_rust::Config::get();
         let lisp_impl = config.lisp_impl.clone();
 
-        // Use MasterReplClient to connect (with auto-start)
-        let mut repl_client = common_rust::MasterReplClient::new("unused");
-        repl_client.connect()
+        let mut repl = MasterReplClient::new();
+        repl.connect()
             .context("Failed to connect to master REPL")?;
-
-        // Get the socket from the client
-        let socket_path = common_rust::get_socket_path();
-        let socket = UnixStream::connect(&socket_path)
-            .context(format!("Failed to connect to master REPL at {}", socket_path.to_string_lossy()))?;
 
         let mut lines = Vec::new();
         lines.push(HistoryLine {
@@ -96,7 +89,7 @@ impl App {
             line_type: LineType::Output,
         });
         lines.push(HistoryLine {
-            content: format!("; Connected to: {}", socket_path.to_string_lossy()),
+            content: format!("; Connected via {}", common_rust::connection_file_path().display()),
             line_type: LineType::Output,
         });
         lines.push(HistoryLine {
@@ -118,87 +111,25 @@ impl App {
             scroll_offset: 0,
             visible_height: 24,  // Default, will be updated during render
             request_counter: 0,
-            socket,
+            repl,
         })
     }
 
     fn send_eval(&mut self, code: &str) -> Result<()> {
         self.request_counter += 1;
         let id = format!("tui-{}", self.request_counter);
-
-        // Send request as s-expression
-        let request = format!(
-            "(:type \"eval\" :id \"{}\" :code \"{}\")\n",
+        let request = ReplRequest::Eval {
             id,
-            code.replace("\\", "\\\\").replace("\"", "\\\"")
-        );
-
-        self.socket
-            .write_all(request.as_bytes())
-            .context("Failed to send request")?;
-        self.socket
-            .flush()
-            .context("Failed to flush socket")?;
-
-        // Read complete s-expression response (can span multiple lines)
-        // We need to read character by character and track parentheses depth
-        let mut response_str = String::new();
-        let mut byte_buf = [0u8; 1];
-        let mut paren_depth = 0;
-        let mut in_string = false;
-        let mut escape_next = false;
-        let mut started = false;
-
-        loop {
-            match Read::read(&mut self.socket, &mut byte_buf) {
-                Ok(0) => {
-                    return Err(anyhow::anyhow!("Connection closed by master REPL"));
-                }
-                Ok(_) => {
-                    let ch = byte_buf[0] as char;
-                    response_str.push(ch);
-
-                    if escape_next {
-                        escape_next = false;
-                        continue;
-                    }
-
-                    match ch {
-                        '\\' if in_string => {
-                            escape_next = true;
-                        }
-                        '"' => {
-                            in_string = !in_string;
-                        }
-                        '(' if !in_string => {
-                            paren_depth += 1;
-                            started = true;
-                        }
-                        ')' if !in_string => {
-                            paren_depth -= 1;
-                            // Complete s-expression when parens are balanced
-                            if started && paren_depth == 0 {
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Err(e) => {
-                    return Err(e).context("Failed to read response");
-                }
-            }
-        }
-
-        // Simple S-expression parsing
-        // Extract :OUTPUT "..."
-        if let Some(start) = response_str.find(":OUTPUT \"") {
-            let start = start + 9;
-            if let Some(end) = response_str[start..].find('"') {
-                let output = &response_str[start..start + end];
+            code: code.to_string(),
+            package: None,
+            file_path: None,
+            file_line: None,
+            file_character: None,
+        };
+        let response = self.repl.send_request(request)?;
+        match response.data {
+            ResponseData::EvalResult { output, values, error, .. } => {
                 if !output.is_empty() {
-                    // Unescape and split by lines
-                    let output = output.replace("\\n", "\n");
                     for line in output.lines() {
                         self.lines.push(HistoryLine {
                             content: line.to_string(),
@@ -206,103 +137,41 @@ impl App {
                         });
                     }
                 }
-            }
-        }
-
-        // Extract :ERROR
-        if response_str.contains(":ERROR \"") {
-            if let Some(start) = response_str.find(":ERROR \"") {
-                let start = start + 8;
-                if let Some(end) = response_str[start..].find('"') {
-                    let error = &response_str[start..start + end];
+                if let Some(error) = error {
                     self.lines.push(HistoryLine {
                         content: format!("; Evaluation aborted: {}", error),
                         line_type: LineType::Output,
                     });
-                }
-            }
-        } else if response_str.contains(":VALUES NIL") {
-            // VALUES is NIL
-            self.lines.push(HistoryLine {
-                content: "NIL".to_string(),
-                line_type: LineType::Output,
-            });
-        } else if let Some(start) = response_str.find(":VALUES (") {
-            // VALUES is a list - parse quoted strings with proper escaping
-            let start = start + 9;
-            if let Some(end) = response_str[start..].find(") :") {
-                let values_section = &response_str[start..start + end];
-
-                // Parse quoted strings manually to handle escaped quotes
-                let mut values = Vec::new();
-                let mut chars = values_section.chars().peekable();
-
-                while let Some(ch) = chars.next() {
-                    if ch == '"' {
-                        // Start of a quoted string
-                        let mut value = String::new();
-                        let mut escaped = false;
-
-                        while let Some(ch) = chars.next() {
-                            if escaped {
-                                // Handle escape sequences
-                                match ch {
-                                    'n' => value.push('\n'),
-                                    't' => value.push('\t'),
-                                    'r' => value.push('\r'),
-                                    '\\' => value.push('\\'),
-                                    '"' => value.push('"'),
-                                    _ => {
-                                        value.push('\\');
-                                        value.push(ch);
-                                    }
-                                }
-                                escaped = false;
-                            } else if ch == '\\' {
-                                escaped = true;
-                            } else if ch == '"' {
-                                // End of quoted string
-                                break;
-                            } else {
-                                value.push(ch);
-                            }
-                        }
-
-                        if !value.is_empty() {
-                            values.push(value);
-                        }
-                    }
-                }
-
-                for value in values {
+                } else if values.is_empty() {
                     self.lines.push(HistoryLine {
-                        content: value,
+                        content: "NIL".to_string(),
                         line_type: LineType::Output,
                     });
+                } else {
+                    for value in values {
+                        self.lines.push(HistoryLine {
+                            content: value,
+                            line_type: LineType::Output,
+                        });
+                    }
                 }
             }
+            ResponseData::Error { error } => {
+                self.lines.push(HistoryLine {
+                    content: format!("; Evaluation aborted: {}", error),
+                    line_type: LineType::Output,
+                });
+            }
+            _ => {}
         }
-
-        // Add blank line after result
         self.lines.push(HistoryLine {
             content: "".to_string(),
             line_type: LineType::Output,
         });
-
         Ok(())
     }
 
     fn handle_key_event(&mut self, key: KeyEvent) -> Result<bool> {
-        // DEBUG - log all key events to file
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/tmp/repl-debug.log")
-        {
-            let _ = writeln!(f, "key={:?} kind={:?} mods={:?}", key.code, key.kind, key.modifiers);
-        }
-
-        // Only process KeyPress events, ignore KeyRelease/KeyRepeat
         if key.kind != KeyEventKind::Press {
             return Ok(false);
         }
@@ -841,15 +710,6 @@ fn run_app() -> Result<()> {
         // Handle events
         if event::poll(std::time::Duration::from_millis(100))? {
             let evt = event::read()?;
-            // DEBUG
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/repl-debug.log")
-            {
-                let _ = writeln!(f, "Event received: {:?}", evt);
-            }
-
             if let Event::Key(key) = evt {
                 if app.handle_key_event(key)? {
                     break;

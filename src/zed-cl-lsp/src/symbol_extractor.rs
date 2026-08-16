@@ -41,18 +41,31 @@ impl TreeSitterExtractor {
         self.extract_symbol_from_node(source, node)
     }
 
+    pub fn enclosing_form(&mut self, source: &str, position: Position) -> Option<String> {
+        let tree = self.parse(source)?;
+        let point = Point {
+            row: position.line as usize,
+            column: position.character as usize,
+        };
+        let mut node = tree.root_node().descendant_for_point_range(point, point)?;
+        loop {
+            if node.kind() == "list_lit" {
+                return node.utf8_text(source.as_bytes()).ok().map(str::to_string);
+            }
+            node = node.parent()?;
+        }
+    }
+
     /// Extract symbol name from a tree-sitter node
     #[allow(dead_code)]
     fn extract_symbol_from_node(&self, source: &str, node: Node) -> Option<String> {
         match node.kind() {
-            "sym_name" | "symbol" => {
-                // Direct symbol node
+            "sym_name" | "symbol" | "sym_lit" | "kwd_symbol" | "defun_keyword" => {
                 Some(node.utf8_text(source.as_bytes()).ok()?.to_uppercase())
             }
             "list_lit" => {
-                // We're inside a list, find the symbol child
                 for child in node.children(&mut node.walk()) {
-                    if child.kind() == "sym_name" || child.kind() == "symbol" {
+                    if matches!(child.kind(), "sym_name" | "symbol" | "sym_lit" | "kwd_symbol" | "defun_keyword") {
                         return Some(child.utf8_text(source.as_bytes()).ok()?.to_uppercase());
                     }
                 }
@@ -530,7 +543,7 @@ mod tests {
         let root = tree.root_node();
 
         println!("\n=== Tree Structure ===");
-        print_tree_helper(root, source, 0);
+        println!("{:?}", root.to_sexp());
 
         println!("\n=== Looking for definitions ===");
         let defs = extractor.find_definitions(source);
@@ -547,7 +560,7 @@ mod tests {
         let root = tree.root_node();
 
         println!("\n=== defvar and defclass Tree Structure ===");
-        print_tree_helper(root, source, 0);
+        println!("{:?}", root.to_sexp());
 
         println!("\n=== Looking for definitions ===");
         let defs = extractor.find_definitions(source);

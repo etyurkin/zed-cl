@@ -5,5 +5,12 @@ line_comments = ["; "]
 block_comment = ["#|", "|#"]
 tab_size = 2
 hard_tabs = false
+code_fence_block_name = "lisp"
+kernel_language_names = ["common-lisp", "lisp"]
+word_characters = ["-", "*", "+", "/", "<", ">", "=", "!", "?"]
+completion_query_characters = [":", "-", "*", "+", "/"]
+autoclose_before = ")]}\";"
+increase_indent_pattern = "^[^;]*\\([^;]*$"
+decrease_indent_pattern = "^\\s*\\)"
 
 [language_servers.zed-cl]

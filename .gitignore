@@ -3,7 +3,6 @@
 
 # Rust build artifacts
 target/
-Cargo.lock
 bin/
 
 # Compiled extension
@@ -12,3 +11,6 @@ grammars/
 
 # Common Lisp compiled files
 *.fasl
+
+# Local rustc dump (not a toolchain pin; see rust-toolchain.toml)
+.rustc-version
