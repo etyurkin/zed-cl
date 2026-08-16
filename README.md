@@ -2,6 +2,8 @@
 
 Common Lisp language support for the Zed editor with integrated LSP server and Jupyter kernel support.
 
+![zed-cl demo](assets/zed-cl-demo.png)
+
 ## Features
 
 - **LSP Features**: Syntax highlighting, autocomplete, hover documentation, goto-definition
