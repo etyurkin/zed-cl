@@ -13,17 +13,18 @@ const WORKTREE_ENV_KEYS: &[&str] = &[
     "HOMEPATH",
 ];
 
-const ZED_CL_ASD: &str = include_str!("zed-cl-repl-impl/zed-cl.asd");
-const START_MASTER_REPL: &str = include_str!("zed-cl-repl-impl/start-master-repl.lisp");
-const BOOTSTRAP: &str = include_str!("zed-cl-repl-impl/bootstrap.lisp");
-const COMPAT: &str = include_str!("zed-cl-repl-impl/compat.lisp");
-const CONFIG: &str = include_str!("zed-cl-repl-impl/config.lisp");
-const DISPLAY: &str = include_str!("zed-cl-repl-impl/display.lisp");
-const SOCKET_SERVER: &str = include_str!("zed-cl-repl-impl/socket-server.lisp");
-const MASTER_REPL: &str = include_str!("zed-cl-repl-impl/master-repl.lisp");
+const ZED_CL_ASD: &str = include_str!("../../zed-cl-repl-impl/zed-cl.asd");
+const START_MASTER_REPL: &str = include_str!("../../zed-cl-repl-impl/start-master-repl.lisp");
+const BOOTSTRAP: &str = include_str!("../../zed-cl-repl-impl/bootstrap.lisp");
+const COMPAT: &str = include_str!("../../zed-cl-repl-impl/compat.lisp");
+const CONFIG: &str = include_str!("../../zed-cl-repl-impl/config.lisp");
+const DISPLAY: &str = include_str!("../../zed-cl-repl-impl/display.lisp");
+const SOCKET_SERVER: &str = include_str!("../../zed-cl-repl-impl/socket-server.lisp");
+const MASTER_REPL: &str = include_str!("../../zed-cl-repl-impl/master-repl.lisp");
 
 struct CommonLispExtension {
     cached_lsp_path: Option<String>,
+    github_unavailable: bool,
 }
 
 impl CommonLispExtension {
@@ -37,12 +38,28 @@ impl CommonLispExtension {
 
     fn local_binary(name: &str) -> Option<String> {
         let file = Self::binary_name(name);
-        let path = PathBuf::from("bin").join(&file);
-        if path.is_file() {
-            Some(path.to_string_lossy().to_string())
-        } else {
-            None
+        for path in [
+            PathBuf::from("bin").join(&file),
+            PathBuf::from(&file),
+        ] {
+            if path.is_file() {
+                return Some(path.to_string_lossy().to_string());
+            }
         }
+        None
+    }
+
+    fn home_binary(worktree: &zed::Worktree, name: &str) -> Option<String> {
+        let home = Self::env_value(worktree, "HOME")
+            .or_else(|| Self::env_value(worktree, "USERPROFILE"))?;
+        Some(
+            PathBuf::from(home)
+                .join(".zed-cl")
+                .join("bin")
+                .join(Self::binary_name(name))
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
 
     fn asset_name() -> String {
@@ -72,7 +89,12 @@ impl CommonLispExtension {
                 require_assets: true,
                 pre_release: false,
             },
-        )?;
+        )
+        .map_err(|e| {
+            format!(
+                "no GitHub release for {GITHUB_REPO} ({e}). Built binaries belong in ~/.zed-cl/bin"
+            )
+        })?;
 
         let asset_name = Self::asset_name();
         let asset = release
@@ -128,21 +150,37 @@ impl CommonLispExtension {
                 return Ok(path.clone());
             }
         }
-        self.download_binaries(language_server_id)
+        if let Some(path) = Self::home_binary(worktree, "zed-cl-lsp") {
+            if Path::new(&path).is_file() {
+                return Ok(path);
+            }
+        }
+        if !self.github_unavailable {
+            match self.download_binaries(language_server_id) {
+                Ok(path) => return Ok(path),
+                Err(_) => self.github_unavailable = true,
+            }
+        }
+        Self::home_binary(worktree, "zed-cl-lsp").ok_or_else(|| {
+            "zed-cl-lsp not found on PATH or in ~/.zed-cl/bin. Run `make build`."
+                .to_string()
+        })
     }
 
     fn kernel_binary_path(&self, worktree: &zed::Worktree) -> Option<String> {
         if let Some(path) = worktree.which(&Self::binary_name("zed-cl-kernel")) {
             return Some(path);
         }
-        Self::local_binary("zed-cl-kernel").or_else(|| {
-            self.cached_lsp_path.as_ref().map(|lsp| {
-                lsp.replace(
-                    &Self::binary_name("zed-cl-lsp"),
-                    &Self::binary_name("zed-cl-kernel"),
-                )
+        Self::local_binary("zed-cl-kernel")
+            .or_else(|| Self::home_binary(worktree, "zed-cl-kernel"))
+            .or_else(|| {
+                self.cached_lsp_path.as_ref().map(|lsp| {
+                    lsp.replace(
+                        &Self::binary_name("zed-cl-lsp"),
+                        &Self::binary_name("zed-cl-kernel"),
+                    )
+                })
             })
-        })
     }
 
     fn env_value(worktree: &zed::Worktree, key: &str) -> Option<String> {
@@ -227,6 +265,7 @@ impl zed::Extension for CommonLispExtension {
     fn new() -> Self {
         Self {
             cached_lsp_path: None,
+            github_unavailable: false,
         }
     }
 

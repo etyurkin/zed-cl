@@ -255,23 +255,23 @@ impl MasterReplClient {
         let sexp = request.to_sexp();
         debug!("Sending request: {}", sexp);
 
-        if let Err(_e) = write_sexp(self.stream.as_mut().context("Not connected")?, &sexp) {
-            self.stream = None;
-            self.ensure_connected()?;
-            write_sexp(self.stream.as_mut().context("Not connected")?, &sexp)
-                .context("Failed to send request after reconnect")?;
-        }
-
-        match read_sexp(self.stream.as_mut().context("Not connected")?) {
-            Ok(response) => {
-                debug!("Received response: {}", response.trim());
-                ReplResponse::from_sexp(&response, &request_id)
-            }
+        match self.write_and_read(&sexp, &request_id) {
+            Ok(response) => Ok(response),
             Err(e) => {
+                debug!("Request failed ({e:#}), reconnecting");
                 self.stream = None;
-                Err(e)
+                self.ensure_connected()?;
+                self.write_and_read(&sexp, &request_id)
+                    .with_context(|| format!("Failed after reconnect: {e:#}"))
             }
         }
+    }
+
+    fn write_and_read(&mut self, sexp: &str, request_id: &str) -> Result<ReplResponse> {
+        write_sexp(self.stream.as_mut().context("Not connected")?, sexp)?;
+        let response = read_sexp(self.stream.as_mut().context("Not connected")?)?;
+        debug!("Received response: {}", response.trim());
+        ReplResponse::from_sexp(&response, request_id)
     }
 
     fn assign_id(&mut self, request: &mut ReplRequest) {

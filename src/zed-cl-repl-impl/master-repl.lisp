@@ -26,6 +26,9 @@
 (defparameter *master-running* t
   "Is master REPL running?")
 
+(defvar *current-file* nil)
+(defvar *known-files* nil)
+
 
 ;;;; Initialize package whitelist
 (unless (listp *completion-package-whitelist*)
@@ -383,22 +386,102 @@
     (funcall 'zed-cl::get-display-outputs)))
 
 
+(defun incomplete-code-p (code)
+  (handler-case
+      (progn
+        (with-input-from-string (in code)
+          (loop for form = (read in nil :eof)
+                until (eq form :eof)))
+        nil)
+    (end-of-file () t)
+    (error () nil)))
+
+(defun slurp-file (path)
+  (with-open-file (in path :direction :input :if-does-not-exist nil)
+    (unless in
+      (return-from slurp-file nil))
+    (let ((buf (make-array 4096 :element-type 'character)))
+      (with-output-to-string (out)
+        (loop for n = (read-sequence buf in)
+              until (zerop n)
+              do (write-sequence buf out :end n))))))
+
+(defun top-level-form-start (text idx)
+  (loop for i from (min idx (max 0 (1- (length text)))) downto 0
+        when (and (char= (char text i) #\()
+                  (or (zerop i)
+                      (member (char text (1- i)) '(#\Newline #\Return))))
+        return i))
+
+(defun eval-operator-forms-before (text end operator)
+  (let ((needle (concatenate 'string "(" operator))
+        (start 0))
+    (loop
+      (let ((pos (search needle text :start2 start :end2 end :test #'char-equal)))
+        (unless pos
+          (return))
+        (with-input-from-string (in text :start pos)
+          (let ((form (ignore-errors (read in nil nil))))
+            (when (and (consp form)
+                       (symbolp (first form))
+                       (string-equal (symbol-name (first form)) operator))
+              (ignore-errors (eval form)))))
+        (setf start (1+ pos))))))
+
+(defun expand-incomplete-in-file (code path)
+  (let* ((text (slurp-file path))
+         (needle (string-trim '(#\Space #\Tab #\Newline #\Return) code)))
+    (when (or (null text) (zerop (length needle)))
+      (return-from expand-incomplete-in-file nil))
+    (let ((idx (search needle text)))
+      (unless idx
+        (return-from expand-incomplete-in-file nil))
+      (let ((start (or (top-level-form-start text idx) idx)))
+        (let ((*package* *package*))
+          (eval-operator-forms-before text start "defpackage")
+          (eval-operator-forms-before text start "in-package")
+          (with-input-from-string (in text :start start)
+            (handler-case (read in nil nil)
+              (error () nil))))))))
+
+(defun candidate-source-paths (preferred)
+  (delete-duplicates
+   (append (when preferred (list preferred))
+           (when *current-file* (list *current-file*))
+           *known-files*)
+   :test #'equal
+   :from-end t))
+
+(defun expand-incomplete-form (code &optional preferred-path)
+  (dolist (path (candidate-source-paths preferred-path))
+    (let ((form (expand-incomplete-in-file code path)))
+      (when form
+        (return (values form path))))))
+
+(defun eval-one-form (form &optional file-path)
+  (if file-path
+      (with-source-tracking (file-path)
+        (multiple-value-list (eval form)))
+      (multiple-value-list (eval form))))
+
 (defun eval-forms-from-code (code &optional file-path line character)
   "Read and evaluate all forms from code string"
   (declare (ignore line character))
-  (let ((values nil))
-    (with-input-from-string (stream code)
-      (loop for form = (read stream nil :eof)
-            until (eq form :eof)
-            do (setf values
-                     (if file-path
-                         ;; Compile with source tracking for better backtraces
-                         (with-source-tracking (file-path)
-                           (multiple-value-list
-                            (funcall (compile nil `(lambda () ,form)))))
-                         ;; Regular eval without source tracking
-                         (multiple-value-list (eval form))))))
-    values))
+  (when file-path
+    (setf *current-file* file-path))
+  (if (incomplete-code-p code)
+      (multiple-value-bind (form path)
+          (expand-incomplete-form code (or file-path *current-file*))
+        (unless form
+          (with-input-from-string (s "")
+            (error 'end-of-file :stream s)))
+        (eval-one-form form path))
+      (let ((values nil))
+        (with-input-from-string (stream code)
+          (loop for form = (read stream nil :eof)
+                until (eq form :eof)
+                do (setf values (eval-one-form form file-path))))
+        values)))
 
 (defun capture-backtrace ()
   "Capture current backtrace as string"
@@ -539,6 +622,14 @@
         (write-message stream (list :id msg-id :error "Symbol not found")))))
 
 
+(defun handle-set-current-file (msg-id path contents stream)
+  (declare (ignore contents))
+  (when path
+    (setf *current-file* path)
+    (pushnew path *known-files* :test #'equal)
+    (log-error "Current file: ~A (~D known)" path (length *known-files*)))
+  (write-message stream (list :id msg-id :ok t)))
+
 (defun dispatch-message (msg-type msg-id message stream)
   "Dispatch message to appropriate handler"
   (cond
@@ -551,6 +642,9 @@
                          stream))
     ((string= msg-type "ping")
      (handle-ping-message msg-id stream))
+    ((string= msg-type "set-current-file")
+     (handle-set-current-file msg-id (getf message :path)
+                              (getf message :contents) stream))
     ((string= msg-type "list-symbols")
      (handle-list-symbols-message msg-id (getf message :prefix) stream))
     ((string= msg-type "symbol-info")

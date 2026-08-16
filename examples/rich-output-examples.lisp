@@ -1,8 +1,9 @@
 ;;;; rich-output-examples.lisp
 ;;;;
-;;;; Examples of rich output features in Zed Common Lisp REPL
+;;;; Rich output in the Zed Common Lisp REPL.
+;;;; Put the cursor on a form and run repl: run (Ctrl+Shift+Enter).
 ;;;;
-;;;; Zed supports these MIME types:
+;;;; MIME types:
 ;;;; - text/plain (plain text)
 ;;;; - text/markdown (formatted markdown)
 ;;;; - application/json (JSON viewer - preview builds only, after Jan 30, 2026)
@@ -10,8 +11,7 @@
 ;;;; - image/jpeg (JPEG images, base64-encoded)
 ;;;; - application/vnd.dataresource+json (data tables)
 ;;;;
-;;;; All display functions are in the zed-cl package.
-;;;; Use zed-cl:display-markdown, zed-cl:display-table, etc.
+;;;; Display helpers live in package zed-cl (zed-cl:display-markdown, …).
 
 ;; Simple markdown output
 (zed-cl:display-markdown "# Hello World")

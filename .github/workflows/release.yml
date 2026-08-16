@@ -13,6 +13,28 @@ env:
   CARGO_TARGET_DIR: target
 
 jobs:
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - name: Build extension WASM
+        run: cargo build --release --target wasm32-wasip2 --manifest-path src/zed-cl-extension/Cargo.toml
+      - name: Pack extension
+        run: |
+          mkdir -p dist-extension
+          cp target/wasm32-wasip2/release/zed_commonlisp.wasm dist-extension/extension.wasm
+          cp extension.toml dist-extension/
+          cp -R languages dist-extension/
+          (cd dist-extension && zip -r ../zed-cl-extension.zip .)
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: zed-cl-extension.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
   release:
     strategy:
       fail-fast: false

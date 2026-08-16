@@ -1,4 +1,4 @@
-.PHONY: all build build-lsp build-kernel build-repl-tui build-extension clean test install-dev help verify-lisp verify setup-grammar setup-quicklisp build-system-index build-system-index-if-missing build-indexer bundle register-kernel check
+.PHONY: all build build-lsp build-kernel build-repl-tui build-extension clean test install-dev help verify-lisp verify setup-grammar setup-quicklisp build-system-index build-system-index-if-missing build-indexer bundle register-kernel check ensure-toolchain
 
 # Rust binary names
 ifeq ($(OS),Windows_NT)
@@ -31,6 +31,9 @@ REPL_TUI_BUILD_DIR := $(REPL_TUI_DIR)/target/release
 # Extension binary directory
 EXTENSION_BIN_DIR := bin
 
+EXTENSION_DIR := src/zed-cl-extension
+WASM_OUT := $(EXTENSION_DIR)/target/wasm32-wasip2/release/zed_commonlisp.wasm
+
 # Colors
 GREEN := \033[0;32m
 BLUE := \033[0;34m
@@ -38,6 +41,10 @@ YELLOW := \033[0;33m
 NC := \033[0m
 
 all: setup-grammar setup-quicklisp build
+
+ensure-toolchain:
+	@command -v rustup >/dev/null || { echo "$(YELLOW)rustup is required (Homebrew rustc cannot build wasm32-wasip2)$(NC)"; exit 1; }
+	@rustup target add wasm32-wasip2 --toolchain stable
 
 # Install Quicklisp and dependencies
 setup-quicklisp:
@@ -155,7 +162,7 @@ help:
 	@echo "  make verify-lisp       - Verify REPL Lisp files compile"
 	@echo ""
 
-build: setup-grammar setup-quicklisp verify-lisp build-system-index-if-missing build-lsp build-kernel build-repl-tui bundle build-extension register-kernel
+build: ensure-toolchain setup-grammar setup-quicklisp verify-lisp build-system-index-if-missing build-lsp build-kernel build-repl-tui bundle build-extension register-kernel
 	@echo "$(GREEN)✓ Build complete!$(NC)"
 	@echo ""
 	@echo "Binaries:"
@@ -186,11 +193,12 @@ build-repl-tui:
 	@cargo build --release --manifest-path=$(REPL_TUI_DIR)/Cargo.toml
 	@echo "$(GREEN)✓ TUI REPL client built$(NC)"
 
-build-extension:
+build-extension: ensure-toolchain
 	@echo "$(BLUE)Building Zed extension WASM...$(NC)"
-	@rustup target add wasm32-wasip2 2>/dev/null || true
-	@cargo build --release --target wasm32-wasip2
-	@cp target/wasm32-wasip2/release/zed_commonlisp.wasm extension.wasm
+	@bin=$$(dirname $$(rustup which rustc --toolchain stable)); \
+	PATH="$$bin:$$PATH" RUSTC="$$bin/rustc" \
+	"$$bin/cargo" build --release --target wasm32-wasip2 --manifest-path=$(EXTENSION_DIR)/Cargo.toml
+	@cp $(WASM_OUT) extension.wasm
 	@echo "$(GREEN)✓ Extension WASM built$(NC)"
 
 check: setup-quicklisp verify-lisp
@@ -202,28 +210,12 @@ check: setup-quicklisp verify-lisp
 
 verify-lisp:
 	@echo "$(BLUE)Verifying REPL Lisp files...$(NC)"
-	@if ! which sbcl > /dev/null 2>&1; then \
+	@if ! command -v sbcl >/dev/null 2>&1; then \
 		echo "$(YELLOW)⚠ SBCL not found, skipping Lisp verification$(NC)"; \
 		exit 0; \
 	fi
-	@sbcl --noinform --non-interactive \
-		--eval '(handler-case \
-		          (progn \
-		            (let ((quicklisp-init (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))) \
-		              (when (probe-file quicklisp-init) (load quicklisp-init))) \
-		            (require :asdf) \
-		            (push (truename "src/zed-cl-repl-impl/") asdf:*central-registry*) \
-		            (asdf:load-system :zed-cl/master-repl) \
-		            (funcall (intern "EVAL-FORMS-FROM-CODE" :zed-cl.master-repl) "(+ 1 2)" nil nil nil) \
-		            (sb-ext:exit :code 0)) \
-		        (error (e) \
-		          (format *error-output* "✗ REPL Lisp verification failed: ~A~%" e) \
-		          (sb-ext:exit :code 1)))' 2>&1 | { grep -v "^;" || true; }; \
-		if [ $${PIPESTATUS[0]} -eq 0 ]; then \
-			echo "$(GREEN)✓ REPL Lisp files compiled successfully$(NC)"; \
-		else \
-			exit 1; \
-		fi
+	@sbcl --script scripts/verify-lisp.lisp
+	@echo "$(GREEN)✓ REPL Lisp files compiled successfully$(NC)"
 
 test:
 	@echo "$(BLUE)Running tests...$(NC)"
@@ -232,10 +224,10 @@ test:
 	@cargo test --manifest-path=src/zed-cl-common/Cargo.toml
 	@echo "$(GREEN)✓ Tests passed$(NC)"
 
-# Bundle binaries for Zed extension
+# Bundle binaries for Zed extension (repo bin, ~/.zed-cl/bin, Zed work dir)
 bundle: build-lsp build-kernel build-repl-tui build-indexer
 	@echo "$(BLUE)Bundling binaries for extension...$(NC)"
-	@mkdir -p $(EXTENSION_BIN_DIR)
+	@mkdir -p $(EXTENSION_BIN_DIR) $(INDEX_DIR)/bin
 	@cp $(LSP_BUILD_DIR)/$(LSP_BIN) $(EXTENSION_BIN_DIR)/
 	@cp $(KERNEL_BUILD_DIR)/$(KERNEL_BIN) $(EXTENSION_BIN_DIR)/
 	@cp $(REPL_TUI_BUILD_DIR)/$(REPL_TUI_BIN) $(EXTENSION_BIN_DIR)/
@@ -247,12 +239,18 @@ bundle: build-lsp build-kernel build-repl-tui build-indexer
 		codesign --force --deep --sign - $(EXTENSION_BIN_DIR)/$(REPL_TUI_BIN) 2>/dev/null || true; \
 		codesign --force --deep --sign - $(EXTENSION_BIN_DIR)/zed-cl-index$(EXE) 2>/dev/null || true; \
 	fi
-	@echo "$(GREEN)✓ Binaries bundled in $(EXTENSION_BIN_DIR)/$(NC)"
+	@cp $(EXTENSION_BIN_DIR)/$(LSP_BIN) $(INDEX_DIR)/bin/
+	@cp $(EXTENSION_BIN_DIR)/$(KERNEL_BIN) $(INDEX_DIR)/bin/
+	@cp $(EXTENSION_BIN_DIR)/$(REPL_TUI_BIN) $(INDEX_DIR)/bin/
+	@cp $(EXTENSION_BIN_DIR)/zed-cl-index$(EXE) $(INDEX_DIR)/bin/
+	@echo "$(GREEN)✓ Binaries bundled in $(EXTENSION_BIN_DIR)/ and $(INDEX_DIR)/bin/$(NC)"
+	@sh scripts/install-zed-work-bins.sh
 
 clean:
 	@echo "$(YELLOW)Cleaning build artifacts...$(NC)"
 	@cargo clean --manifest-path=$(LSP_DIR)/Cargo.toml
 	@cargo clean --manifest-path=$(KERNEL_DIR)/Cargo.toml
+	@cargo clean --manifest-path=$(EXTENSION_DIR)/Cargo.toml
 	@rm -rf $(EXTENSION_BIN_DIR)
 	@rm -rf target/
 	@rm -rf grammars/
@@ -272,7 +270,7 @@ install-dev: build
 	@echo "$(GREEN)✓ Extension ready for Zed.$(NC)"
 	@echo ""
 	@echo "In Zed: command palette → zed: install dev extension → this directory"
-	@echo "Native binaries live in bin/ (not inside WASM). Open a .lisp file and press Ctrl+Shift+Enter."
+	@echo "Zed loads extension.wasm from make; it does not compile the WASM crate."
 
 # Register kernel for Zed (required for REPL to work)
 register-kernel: bundle

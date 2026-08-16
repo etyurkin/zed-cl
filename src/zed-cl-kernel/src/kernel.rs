@@ -4,7 +4,7 @@ use anyhow::Result;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use bytes::Bytes;
-use common_rust::{MasterReplClient, ReplRequest, KERNEL_SHUTDOWN_ENDPOINT};
+use common_rust::{MasterReplClient, ReplRequest};
 use data_encoding::HEXLOWER;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -184,11 +184,6 @@ impl LispKernel {
         let mut stdin_socket = zeromq::RouterSocket::new();
         let mut hb_socket = zeromq::RepSocket::new();
 
-        let mut shutdown_socket = zeromq::SubSocket::new();
-        shutdown_socket.connect(KERNEL_SHUTDOWN_ENDPOINT).await?;
-        shutdown_socket.subscribe("").await?;
-        info!("Subscribed to shutdown broadcasts on {KERNEL_SHUTDOWN_ENDPOINT}");
-
         shell_socket.bind(&self.connection_info.shell_address()).await?;
         iopub_socket.bind(&self.connection_info.iopub_address()).await?;
         control_socket.bind(&self.connection_info.control_address()).await?;
@@ -234,25 +229,6 @@ impl LispKernel {
                         debug!("Stdin recv ended: {}", e);
                         break;
                     }
-                }
-            }
-        });
-
-        // Spawn shutdown monitor task
-        tokio::spawn(async move {
-            info!("Starting shutdown monitor...");
-            match shutdown_socket.recv().await {
-                Ok(msg) => {
-                    if let Some(first_part) = msg.into_vec().first() {
-                        if first_part.as_ref() == b"SHUTDOWN" {
-                            info!("Received shutdown broadcast from LSP - exiting");
-                            std::process::exit(0);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Shutdown monitor recv error: {}", e);
-                    std::process::exit(1);
                 }
             }
         });

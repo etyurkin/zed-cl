@@ -1,7 +1,13 @@
 ;;;; Common Lisp Examples
 ;;;;
-;;;; Comprehensive examples demonstrating LSP features with type-aware completions.
-;;;; Evaluate these in your Jupyter notebook to see intelligent completions in Zed!
+;;;; 1. Simple evaluation in CL-USER.
+;;;;    Put the cursor on a defun (no selection needed) and run repl: run
+;;;;    (Ctrl+Shift+Enter). Then eval a call such as (hello-world).
+;;;;
+;;;; 2. Cross-file / cross-package: eval examples/my-utils.lisp first, then the
+;;;;    my-utils: calls below. using-shared-repl.lisp does the same from another file.
+;;;;
+;;;; 3. Rich output: examples/rich-output-examples.lisp
 
 ;;; =============================================================================
 ;;; Basic Functions
@@ -23,7 +29,11 @@
 
 (greet "Nancy")
 
-(my-utils::multiply-numbers 10 20)
+;;; These live in package MY-UTILS (examples/my-utils.lisp), not CL-USER.
+;;; Eval that file first, then these calls.
+(my-utils:multiply-numbers 10 20)
+(my-utils:format-greeting "John")
+
 ;;; =============================================================================
 ;;; Numeric Functions
 ;;; =============================================================================
@@ -137,7 +147,7 @@
 
 ;;; To test LSP completions:
 ;;;
-;;; 1. Evaluate all functions above in your Jupyter notebook
+;;; 1. Evaluate the defuns above in the Zed REPL (cursor on form, Ctrl+Shift+Enter)
 ;;; 2. In Zed, start typing function names:
 ;;;    - (gree     suggests: greet "${1:str}"$0
 ;;;    - (fact     suggests: factorial ${1:0}$0

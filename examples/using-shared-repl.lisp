@@ -1,52 +1,56 @@
-;;;; Using Shared REPL - Example
+;;;; using-shared-repl.lisp
 ;;;;
-;;;; This file demonstrates how the shared master REPL works.
-;;;; Functions defined in common-lisp-examples.lisp are available here!
+;;;; Call functions defined in other files/packages. Same master REPL, same image.
 ;;;;
-;;;; INSTRUCTIONS:
-;;;; 1. Open common-lisp-examples.lisp in Zed
-;;;; 2. Select and evaluate the functions there (Ctrl+Shift+Enter)
-;;;; 3. Open THIS file in Zed
-;;;; 4. Evaluate the examples below - they use functions from the other file!
+;;;; Eval first (cursor on each form, Ctrl+Shift+Enter):
+;;;;   1. examples/common-lisp-examples.lisp  — CL-USER helpers (greet, factorial, …)
+;;;;   2. examples/my-utils.lisp              — package MY-UTILS
+;;;; Then eval the calls in this file.
+
+(in-package :cl-user)
 
 ;;; =============================================================================
-;;; Using Functions from common-lisp-examples.lisp
+;;; From common-lisp-examples.lisp (CL-USER)
 ;;; =============================================================================
 
-;; Test greeting functions
-;; These use the 'greet' function defined in common-lisp-examples.lisp
 (greet "Alice")
 (greet "Bob")
 
-;; Test numeric functions
-;; These use factorial and fibonacci from common-lisp-examples.lisp
 (format t "~&Factorial of 5: ~A~%" (factorial 5))
 (format t "~&Fibonacci of 10: ~A~%" (fibonacci 10))
 (format t "~&Area of circle (radius 5): ~A~%" (calculate-area 5))
 
-;; Test list operations
-;; These use sum-list and filter-positive from common-lisp-examples.lisp
 (format t "~&Sum of list: ~A~%" (sum-list '(1 2 3 4 5)))
 (format t "~&Positive numbers: ~A~%" (filter-positive '(-3 -1 0 2 5 -8 10)))
 
-;; Test string operations
-;; These use shout and whisper from common-lisp-examples.lisp
 (format t "~&Shouting: ~A~%" (shout "hello world"))
 (format t "~&Whispering: ~A~%" (whisper "HELLO WORLD"))
 
 ;;; =============================================================================
-;;; Combining Functions from Both Files
+;;; From examples/my-utils.lisp (package MY-UTILS)
+;;; =============================================================================
+
+;; Exported symbols: package prefix my-utils:
+(my-utils:add-numbers 5 10)
+(my-utils:multiply-numbers 3 7)
+(my-utils:format-greeting "World")
+
+;; Non-exported: double colon
+(my-utils::internal-helper 5)
+
+;;; =============================================================================
+;;; Combine both files from this package
 ;;; =============================================================================
 
 (defun greet-and-calculate (name n)
-  "Combine greeting with factorial calculation"
+  "CL-USER function that calls CL-USER greet/factorial from the other file."
   (declare (type string name)
            (type integer n))
   (format t "~&~A~%" (greet name))
   (format t "~&The factorial of ~A is ~A~%" n (factorial n)))
 
 (defun process-names (names)
-  "Process a list of names using greet-all and map-numbers"
+  "CL-USER function that calls greet-all, map-numbers, and sum-list."
   (declare (type list names))
   (format t "~&=== Greeting everyone ===~%")
   (greet-all names)
@@ -55,43 +59,18 @@
     (format t "~&Lengths: ~A~%" lengths)
     (format t "~&Total length: ~A~%" (sum-list lengths))))
 
-;;; =============================================================================
-;;; Testing the Shared REPL
-;;; =============================================================================
+;; Uses MY-UTILS from this file's CL-USER package.
+(defun greet-with-product (name a b)
+  "Call MY-UTILS from CL-USER after eval'ing examples/my-utils.lisp."
+  (format t "~&~A~%" (my-utils:format-greeting name))
+  (format t "~&~A * ~A = ~A~%" a b (my-utils:multiply-numbers a b)))
 
-;; Try these to verify the shared REPL is working:
-
-;; 1. Evaluate greet-and-calculate:
 ;; (greet-and-calculate "Charlie" 7)
-
-;; 2. Evaluate process-names:
 ;; (process-names '("Alice" "Bob" "Charlie" "David"))
+;; (greet-with-product "Nancy" 10 20)
 
-;; 3. Define a variable here and use it in the other file:
 (defparameter *shared-message* "This variable is defined in using-shared-repl.lisp!"
   "A variable to test cross-file state")
 
-;; 4. Now go to common-lisp-examples.lisp and try:
+;; In common-lisp-examples.lisp you can eval:
 ;; (format t "~&~A~%" *shared-message*)
-;; It should work because both files share the same REPL!
-
-;;; =============================================================================
-;;; How This Works
-;;; =============================================================================
-
-;; The shared master REPL architecture means:
-;;
-;; 1. ONE master Lisp process listens on 127.0.0.1 (see ~/.zed-cl/repl-sbcl.json)
-;; 2. Each file gets its own Jupyter kernel (one per file in Zed)
-;; 3. ALL kernels connect to the SAME master REPL
-;; 4. Functions, variables, and state are shared across ALL files
-;;
-;; Benefits:
-;; - Define helper functions in one file, use them everywhere
-;; - Build libraries incrementally across multiple files
-;; - True REPL-driven development experience
-;; - No need to reload code when switching files
-
-(format t "~&~%=== Shared REPL Demo Complete ===~%")
-(format t "~&Functions from common-lisp-examples.lisp are available here!~%")
-(format t "~&Try defining your own functions in either file and using them in both.~%")

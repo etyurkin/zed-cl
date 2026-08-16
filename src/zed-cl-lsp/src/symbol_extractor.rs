@@ -41,6 +41,21 @@ impl TreeSitterExtractor {
         self.extract_symbol_from_node(source, node)
     }
 
+    pub fn enclosing_form(&mut self, source: &str, position: Position) -> Option<String> {
+        let tree = self.parse(source)?;
+        let point = Point {
+            row: position.line as usize,
+            column: position.character as usize,
+        };
+        let mut node = tree.root_node().descendant_for_point_range(point, point)?;
+        loop {
+            if node.kind() == "list_lit" {
+                return node.utf8_text(source.as_bytes()).ok().map(str::to_string);
+            }
+            node = node.parent()?;
+        }
+    }
+
     /// Extract symbol name from a tree-sitter node
     #[allow(dead_code)]
     fn extract_symbol_from_node(&self, source: &str, node: Node) -> Option<String> {

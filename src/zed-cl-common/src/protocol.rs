@@ -42,6 +42,8 @@ pub enum ReplRequest {
     SetCurrentFile {
         id: String,
         path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        contents: Option<String>,
     },
     Ping {
         id: String,
@@ -189,12 +191,16 @@ impl ReplRequest {
                     lisp_string(path)
                 )
             }
-            ReplRequest::SetCurrentFile { id, path } => {
-                format!(
-                    "(:type \"set-current-file\" :id {} :path {})",
-                    lisp_string(id),
-                    lisp_string(path)
-                )
+            ReplRequest::SetCurrentFile { id, path, contents } => {
+                let mut parts = vec![
+                    ":type \"set-current-file\"".to_string(),
+                    format!(":id {}", lisp_string(id)),
+                    format!(":path {}", lisp_string(path)),
+                ];
+                if let Some(text) = contents {
+                    parts.push(format!(":contents {}", lisp_string(text)));
+                }
+                format!("({})", parts.join(" "))
             }
             ReplRequest::Ping { id } => {
                 format!("(:type \"ping\" :id {})", lisp_string(id))
@@ -222,7 +228,7 @@ impl ReplResponse {
             .and_then(value_as_string)
             .unwrap_or_else(|| expected_id.to_string());
 
-        if map.contains_key("PONG") {
+        if map.contains_key("PONG") || map.contains_key("OK") {
             return Ok(ReplResponse {
                 id,
                 data: ResponseData::Pong,
