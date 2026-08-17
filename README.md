@@ -42,7 +42,7 @@ Pick your OS zip:
 
 ### From a GitHub Release (no Rust, no `make`)
 
-Use this after a tagged release (for example `v1.0.0`).
+Use this after a tagged release (for example `v1.0.1`).
 
 1. Open [Releases](https://github.com/etyurkin/zed-cl/releases) and download:
    - `zed-cl-extension.zip`

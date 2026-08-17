@@ -1,6 +1,6 @@
 id = "zed-cl"
 name = "Common Lisp"
-version = "1.0.0"
+version = "1.0.1"
 schema_version = 1
 authors = ["Evgeniy Tyurkin <etyurkin@kwarks.org>"]
 description = "Common Lisp support for Zed"
