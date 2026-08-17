@@ -6,4 +6,4 @@ mod protocol;
 
 pub use config::{data_dir, home_dir, log_dir, Config, Profile, ReplConnection};
 pub use master_repl::{connection_file_path, MasterReplClient};
-pub use protocol::{DisplayData, ReplRequest, ReplResponse, ResponseData, SymbolInfo};
+pub use protocol::{parse_lisp_completion_prefix, DisplayData, ReplRequest, ReplResponse, ResponseData, SymbolInfo};

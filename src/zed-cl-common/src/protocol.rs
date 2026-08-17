@@ -22,6 +22,8 @@ pub enum ReplRequest {
         id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         prefix: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        package: Option<String>,
     },
     Eval {
         id: String,
@@ -30,10 +32,6 @@ pub enum ReplRequest {
         package: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         file_path: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        file_line: Option<u32>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        file_character: Option<u32>,
     },
     LoadFile {
         id: String,
@@ -147,13 +145,16 @@ impl ReplRequest {
                 }
                 format!("({})", parts.join(" "))
             }
-            ReplRequest::ListSymbols { id, prefix } => {
+            ReplRequest::ListSymbols { id, prefix, package } => {
                 let mut parts = vec![
                     ":type \"list-symbols\"".to_string(),
                     format!(":id {}", lisp_string(id)),
                 ];
                 if let Some(pfx) = prefix {
                     parts.push(format!(":prefix {}", lisp_string(pfx)));
+                }
+                if let Some(pkg) = package {
+                    parts.push(format!(":package {}", lisp_string(pkg)));
                 }
                 format!("({})", parts.join(" "))
             }
@@ -162,8 +163,6 @@ impl ReplRequest {
                 code,
                 package,
                 file_path,
-                file_line,
-                file_character,
             } => {
                 let mut parts = vec![
                     ":type \"eval\"".to_string(),
@@ -175,12 +174,6 @@ impl ReplRequest {
                 }
                 if let Some(path) = file_path {
                     parts.push(format!(":file-path {}", lisp_string(path)));
-                }
-                if let Some(line) = file_line {
-                    parts.push(format!(":file-line {}", line));
-                }
-                if let Some(character) = file_character {
-                    parts.push(format!(":file-character {}", character));
                 }
                 format!("({})", parts.join(" "))
             }
@@ -211,6 +204,28 @@ impl ReplRequest {
 
 fn lisp_string(s: &str) -> String {
     format!("\"{}\"", escape_lisp_string(s))
+}
+
+/// Split a typed completion prefix into (package, symbol-prefix).
+/// `pkg:foo` / `pkg::foo` → (Some(pkg), "foo"); `:foo` → (Some("KEYWORD"), "foo").
+pub fn parse_lisp_completion_prefix(prefix: &str) -> (Option<String>, String) {
+    if let Some(pos) = prefix.find("::") {
+        let pkg = &prefix[..pos];
+        let rest = prefix[pos + 2..].to_string();
+        if pkg.is_empty() {
+            (Some("KEYWORD".to_string()), rest)
+        } else {
+            (Some(pkg.to_string()), rest)
+        }
+    } else if let Some(pos) = prefix.find(':') {
+        if pos == 0 {
+            (Some("KEYWORD".to_string()), prefix[1..].to_string())
+        } else {
+            (Some(prefix[..pos].to_string()), prefix[pos + 1..].to_string())
+        }
+    } else {
+        (None, prefix.to_string())
+    }
 }
 
 fn escape_lisp_string(s: &str) -> String {
@@ -522,5 +537,48 @@ mod tests {
         };
         let sexp = request.to_sexp();
         assert!(sexp.contains(r#"C:\\Users\\a\\\"file\\\".lisp"#));
+    }
+
+    #[test]
+    fn list_symbols_includes_package() {
+        let request = ReplRequest::ListSymbols {
+            id: "1".into(),
+            prefix: Some("MAP".into()),
+            package: Some("MY-APP".into()),
+        };
+        let sexp = request.to_sexp();
+        assert!(sexp.contains(":prefix \"MAP\""));
+        assert!(sexp.contains(":package \"MY-APP\""));
+    }
+
+    #[test]
+    fn parse_completion_prefix_splits_qualifiers() {
+        assert_eq!(
+            parse_lisp_completion_prefix("my-app:map"),
+            (Some("my-app".into()), "map".into())
+        );
+        assert_eq!(
+            parse_lisp_completion_prefix("utils::foo"),
+            (Some("utils".into()), "foo".into())
+        );
+        assert_eq!(
+            parse_lisp_completion_prefix(":kw"),
+            (Some("KEYWORD".into()), "kw".into())
+        );
+        assert_eq!(parse_lisp_completion_prefix("bar"), (None, "bar".into()));
+    }
+
+    #[test]
+    fn nil_source_location_fields_are_omitted() {
+        let sexp = r#"(:ID "1" :SYMBOL "FOO" :KIND "function" :PACKAGE "CL-USER" :SOURCE-FILE "/tmp/a.lisp" :SOURCE-LINE NIL :SOURCE-CHARACTER NIL)"#;
+        let response = ReplResponse::from_sexp(sexp, "1").unwrap();
+        match response.data {
+            ResponseData::SymbolInfo(info) => {
+                assert_eq!(info.source_file.as_deref(), Some("/tmp/a.lisp"));
+                assert_eq!(info.source_line, None);
+                assert_eq!(info.source_character, None);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

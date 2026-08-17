@@ -1,7 +1,8 @@
 ;;;; rich-output-examples.lisp
 ;;;;
 ;;;; Rich output in the Zed Common Lisp REPL.
-;;;; Put the cursor on a form and run repl: run (Ctrl+Shift+Enter).
+;;;; Multi-line forms are wrapped in `; %%` cells: put the cursor anywhere in the
+;;;; cell and run repl: run (Ctrl+Shift+Enter). Or expand the selection (Alt+Up).
 ;;;;
 ;;;; MIME types:
 ;;;; - text/plain (plain text)
@@ -14,8 +15,10 @@
 ;;;; Display helpers live in package zed-cl (zed-cl:display-markdown, …).
 
 ;; Simple markdown output
+; %%
 (zed-cl:display-markdown "# Hello World")
 
+; %%
 (zed-cl:display-markdown "# Hello from Common Lisp!
 
 This is **bold** and this is *italic*.
@@ -26,6 +29,7 @@ This is **bold** and this is *italic*.
 - Tables")
 
 ;; Table display (rendered as markdown table)
+; %%
 (zed-cl:display-table '(("Alice" 30 "Engineer")
                         ("Bob" 25 "Designer")
                         ("Charlie" 35 "Manager"))
@@ -33,14 +37,17 @@ This is **bold** and this is *italic*.
 
 ;; display-describe shows object metadata using DESCRIBE
 ;; Good for: packages, classes, symbols, functions
+; %%
 (zed-cl:display-describe *package*)
 
 ;; For a class instance, display-describe shows type info and slots
+; %%
 (defclass person ()
   ((name :initarg :name :accessor person-name)
    (age :initarg :age :accessor person-age)
    (occupation :initarg :occupation :accessor person-occupation)))
 
+; %%
 (zed-cl:display-describe (make-instance 'person
                                         :name "Bob"
                                         :age 25
@@ -50,17 +57,20 @@ This is **bold** and this is *italic*.
 ;; instead of display-describe to see the actual key-value pairs
 
 ;; List display (unordered)
+; %%
 (zed-cl:display-list '("First item"
                        "Second item"
                        "Third item"))
 
 ;; List display (ordered)
+; %%
 (zed-cl:display-list '("Step 1: Initialize"
                        "Step 2: Process"
                        "Step 3: Finalize")
                      :ordered t)
 
 ;; Markdown with code blocks
+; %%
 (zed-cl:display-markdown "## Example Code
 
 ```lisp
@@ -73,6 +83,7 @@ This is **bold** and this is *italic*.
 The function computes **factorial** recursively.")
 
 ;; Multiple outputs in one evaluation
+; %%
 (progn
   (zed-cl:display-markdown "### Multiple Outputs Example")
   (zed-cl:display-table '((1 2 3) (4 5 6) (7 8 9))
@@ -81,11 +92,12 @@ The function computes **factorial** recursively.")
   "Final return value: 42")
 
 ;; Practical example: Display function documentation
+; %%
 (defun show-function-info (function-name)
   "Display detailed information about a function with markdown formatting"
   (let ((doc (documentation function-name 'function))
         (arglist (when (fboundp function-name)
-                  (sb-introspect:function-lambda-list function-name))))
+                   (zed-cl.compat:get-lambda-list function-name))))
     (zed-cl:display-markdown
      (format nil "## ~A
 
@@ -102,9 +114,11 @@ The function computes **factorial** recursively.")
     function-name))
 
 ;; Try it out
+; %%
 (show-function-info 'mapcar)
 
 ;; Practical example: Display hash table contents
+; %%
 (defun display-hash-table (ht &key (title "Hash Table Contents"))
   "Display a hash table as a markdown table"
   (let ((rows nil))
@@ -118,6 +132,7 @@ The function computes **factorial** recursively.")
     (zed-cl:display-markdown (format nil "**~A** (count: ~D)" title (hash-table-count ht)))))
 
 ;; Try it out
+; %%
 (let ((ht (make-hash-table :test 'equal)))
   (setf (gethash "name" ht) "Alice")
   (setf (gethash "age" ht) 30)
@@ -125,23 +140,27 @@ The function computes **factorial** recursively.")
   (display-hash-table ht :title "Employee Data"))
 
 ;; You can mix regular output with rich output
+; %%
 (progn
   (format t "Regular console output~%")
   (zed-cl:display-markdown "**Rich markdown output**")
   (+ 1 2 3))  ; Returns 6
 
 ;; JSON display example (shown as formatted code block in Zed stable)
+; %%
 (zed-cl:display-json "{\"name\": \"Alice\", \"age\": 30, \"skills\": [\"Lisp\", \"Python\", \"Rust\"]}")
 
 ;; Example showing optional :metadata parameter syntax
 ;; Note: metadata is rarely needed - it's for advanced custom rendering
 ;; Most display functions work fine without it
+; %%
 (zed-cl:display-table '(("x" 1) ("y" 2) ("z" 3))
                       :headers '("Variable" "Value")
                       :metadata nil)  ; Optional parameter shown for demonstration
 
 ;; Image display example (PNG)
 ;; This is a 10x10 red square PNG (base64-encoded)
+; %%
 (zed-cl:display-image
  "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC"
  "image/png")

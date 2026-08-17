@@ -231,6 +231,32 @@ impl SymbolIndex {
         Ok(None)
     }
 
+    pub fn lookup_symbol(&self, symbol: &str) -> Result<Option<(PathBuf, u32, u32)>> {
+        let suffix = format!("::{}", symbol.to_uppercase());
+        let read_txn = self.db.begin_read()?;
+        let symbols_table = read_txn.open_table(SYMBOLS_TABLE)?;
+        let files_table = read_txn.open_table(FILES_TABLE)?;
+
+        for entry in symbols_table.iter()? {
+            let (key, value_bytes) = entry?;
+            if !key.value().ends_with(&suffix) {
+                continue;
+            }
+            let locations: Vec<SymbolLocation> = bincode::deserialize(value_bytes.value())?;
+            if let Some(first_loc) = locations.first() {
+                if let Some(file_path) = files_table.get(first_loc.file_id)? {
+                    return Ok(Some((
+                        PathBuf::from(file_path.value()),
+                        first_loc.line,
+                        first_loc.character,
+                    )));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// Get statistics about the index
     pub fn stats(&self) -> Result<IndexStats> {
         let read_txn = self.db.begin_read()?;

@@ -123,8 +123,6 @@ impl App {
             code: code.to_string(),
             package: None,
             file_path: None,
-            file_line: None,
-            file_character: None,
         };
         let response = self.repl.send_request(request)?;
         match response.data {

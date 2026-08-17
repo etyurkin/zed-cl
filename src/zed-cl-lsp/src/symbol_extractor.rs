@@ -194,35 +194,24 @@ impl TreeSitterExtractor {
         // by looking at siblings or reconstructing from the parent
         let is_in_package = node.kind() == "package_lit" || parent_chain.first().map(|s| s.as_str()) == Some("package_lit");
 
-        tracing::info!("is_in_package check: node.kind()={}, parent_chain.first()={:?}, is_in_package={}",
+        tracing::debug!("is_in_package check: node.kind()={}, parent_chain.first()={:?}, is_in_package={}",
                        node.kind(),
                        parent_chain.first(),
                        is_in_package);
 
         if is_in_package {
-            tracing::info!("ENTERED is_in_package block");
-            // We're hovering somewhere in a qualified symbol like "my-utils::multiply-numbers"
-            // The parent node should be package_lit which contains the FULL qualified symbol text
             if let Some(parent) = node.parent() {
-                tracing::info!("Got parent node: kind={}", parent.kind());
-
-                // If parent is package_lit, it contains the full qualified symbol
                 if parent.kind() == "package_lit" {
                     let package_lit_text = parent.utf8_text(source.as_bytes()).ok()?;
-                    tracing::info!("package_lit text: {:?}", package_lit_text);
 
-                    // Parse the qualified symbol from package_lit text
                     if package_lit_text.contains("::") || package_lit_text.contains(':') {
                         let parts: Vec<&str> = if package_lit_text.contains("::") {
                             package_lit_text.split("::").collect()
                         } else {
                             package_lit_text.split(':').collect()
                         };
-                        tracing::info!("Parsed parts: {:?}", parts);
 
                         if parts.len() == 2 {
-                            // Determine if we're hovering over the package part or the symbol part
-                            // by checking which sym_lit child we're on
                             let mut cursor = parent.walk();
                             let children: Vec<_> = parent.children(&mut cursor)
                                 .filter(|n| n.kind() == "sym_lit")
@@ -232,18 +221,13 @@ impl TreeSitterExtractor {
                                 let first_sym = children[0];
                                 let second_sym = children[1];
 
-                                // Check if current node is the first sym_lit (package) or second (symbol)
                                 if node.id() == first_sym.id() {
-                                    // Hovering over package name - return just the package as the symbol
-                                    tracing::info!("Hovering over PACKAGE part: {}", parts[0]);
                                     return Some((
-                                        parts[0].to_uppercase(), // Return package name as "symbol"
-                                        None,                     // No package qualifier
+                                        parts[0].to_uppercase(),
+                                        None,
                                         parent_chain.clone()
                                     ));
                                 } else if node.id() == second_sym.id() {
-                                    // Hovering over symbol name - return symbol with package
-                                    tracing::info!("Hovering over SYMBOL part: {} in package {}", parts[1], parts[0]);
                                     return Some((
                                         parts[1].to_uppercase(),
                                         Some(parts[0].to_uppercase()),
@@ -252,24 +236,15 @@ impl TreeSitterExtractor {
                                 }
                             }
 
-                            // Fallback: return the symbol with package
-                            tracing::info!("Fallback: Returning symbol={}, package={}", parts[1], parts[0]);
                             return Some((
                                 parts[1].to_uppercase(),
                                 Some(parts[0].to_uppercase()),
                                 parent_chain.clone()
                             ));
-                        } else {
-                            tracing::info!("Parts length != 2, got {}", parts.len());
                         }
                     }
-                } else {
-                    tracing::info!("Parent is not package_lit, it's {}", parent.kind());
                 }
-            } else {
-                tracing::info!("No parent node found");
             }
-            tracing::info!("Falling through is_in_package block");
         }
 
         // Walk up to find a qualified symbol
@@ -334,33 +309,18 @@ impl TreeSitterExtractor {
     }
 
     /// Find all function definitions in the source
-    #[allow(dead_code)]
     pub fn find_definitions(&mut self, source: &str) -> Vec<(String, Position)> {
         let tree = match self.parse(source) {
             Some(t) => t,
-            None => {
-                eprintln!("Parse returned None");
-                return vec![];
-            }
+            None => return vec![],
         };
 
         let mut definitions = vec![];
-
-        // Use iterative approach instead of recursion to avoid cursor lifetime issues
         let root = tree.root_node();
-        eprintln!("Root node kind: {}", root.kind());
-        eprintln!("Root node child count: {}", root.child_count());
-
         let mut cursor = root.walk();
-        let mut node_count = 0;
 
         loop {
             let node = cursor.node();
-            node_count += 1;
-
-            if node_count <= 20 {  // Log first 20 nodes
-                eprintln!("Node {}: kind={}, children={}", node_count, node.kind(), node.child_count());
-            }
 
             // Check if this is a definition form
             // Two structures exist in tree-sitter-commonlisp:
