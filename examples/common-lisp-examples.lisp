@@ -1,8 +1,9 @@
 ;;;; Common Lisp Examples
 ;;;;
 ;;;; 1. Simple evaluation in CL-USER.
-;;;;    Put the cursor on a defun (no selection needed) and run repl: run
-;;;;    (Ctrl+Shift+Enter). Then eval a call such as (hello-world).
+;;;;    Forms are `; %%` cells: cursor anywhere in a cell, then repl: run
+;;;;    (Ctrl+Shift+Enter). Or expand the selection (Alt+Up) first.
+;;;;    Then eval a call such as (hello-world).
 ;;;;
 ;;;; 2. Cross-file / cross-package: eval examples/my-utils.lisp first, then the
 ;;;;    my-utils: calls below. using-shared-repl.lisp does the same from another file.
@@ -12,32 +13,42 @@
 ;;; =============================================================================
 ;;; Basic Functions
 ;;; =============================================================================
+; %%
 (in-package :cl-user)
+; %%
 (mapcar #'(lambda (x) (* x x)) '(1 2 3))
 
+; %%
 (defun hello-world ()
   "Print a friendly greeting"
   (format t "Hello, World!~%"))
 
+; %%
 (hello-world)
 
+; %%
 (declaim (ftype (function (string) *) greet))
+; %%
 (defun greet (name)
   "Greet someone by name"
   (declare (type string name))
   (format t "Hello, ~a!~%" name))
 
+; %%
 (greet "Nancy")
 
 ;;; These live in package MY-UTILS (examples/my-utils.lisp), not CL-USER.
 ;;; Eval that file first, then these calls.
+; %%
 (my-utils:multiply-numbers 10 20)
+; %%
 (my-utils:format-greeting "John")
 
 ;;; =============================================================================
 ;;; Numeric Functions
 ;;; =============================================================================
 
+; %%
 (defun factorial (n)
   "Calculate factorial of n"
   (declare (type integer n))
@@ -45,6 +56,7 @@
       1
       (* n (factorial (- n 1)))))
 
+; %%
 (defun fibonacci (n)
   "Calculate the nth Fibonacci number"
   (declare (type integer n))
@@ -53,12 +65,14 @@
       (+ (fibonacci (- n 1))
          (fibonacci (- n 2)))))
 
+; %%
 (defun calculate-area (radius)
   "Calculate area of a circle"
   (declare (type number radius))
   (let ((r-squared (* radius radius)))
     (* pi r-squared)))
 
+; %%
 (defun classify-number (n)
   "Classify a number as negative, zero, or positive"
   (declare (type number n))
@@ -71,6 +85,7 @@
 ;;; List Operations
 ;;; =============================================================================
 
+; %%
 (defun sum-list (lst)
   "Sum all numbers in a list"
   (declare (type list lst))
@@ -78,12 +93,14 @@
       0
       (+ (car lst) (sum-list (cdr lst)))))
 
+; %%
 (defun greet-all (names)
   "Greet multiple people by name"
   (declare (type list names))
   (dolist (name names)
     (format t "Hello, ~a!~%" name)))
 
+; %%
 (defun reverse-list (lst)
   "Reverse a list"
   (declare (type list lst))
@@ -91,6 +108,7 @@
       nil
       (append (reverse-list (cdr lst)) (list (car lst)))))
 
+; %%
 (defun filter-positive (numbers)
   "Filter positive numbers from a list"
   (declare (type list numbers))
@@ -100,16 +118,19 @@
 ;;; String Operations
 ;;; =============================================================================
 
+; %%
 (defun shout (text)
   "Convert text to uppercase"
   (declare (type string text))
   (string-upcase text))
 
+; %%
 (defun whisper (text)
   "Convert text to lowercase"
   (declare (type string text))
   (string-downcase text))
 
+; %%
 (defun reverse-string (text)
   "Reverse a string"
   (declare (type string text))
@@ -119,11 +140,13 @@
 ;;; Higher-Order Functions
 ;;; =============================================================================
 
+; %%
 (defun map-numbers (fn lst)
   "Apply function to all numbers in list"
   (declare (type list lst))
   (mapcar fn lst))
 
+; %%
 (defun apply-twice (fn value)
   "Apply function twice to a value"
   (funcall fn (funcall fn value)))
@@ -132,12 +155,15 @@
 ;;; Variables (for testing completion)
 ;;; =============================================================================
 
+; %%
 (defvar *global-counter* 0
   "A global counter variable")
 
+; %%
 (defparameter *version* "1.0.0"
   "Version string")
 
+; %%
 (defconstant +pi+ 3.14159
   "Value of pi")
 
@@ -147,7 +173,7 @@
 
 ;;; To test LSP completions:
 ;;;
-;;; 1. Evaluate the defuns above in the Zed REPL (cursor on form, Ctrl+Shift+Enter)
+;;; 1. Evaluate the defuns above in the Zed REPL (`; %%` cell or selection, Ctrl+Shift+Enter)
 ;;; 2. In Zed, start typing function names:
 ;;;    - (gree     suggests: greet "${1:str}"$0
 ;;;    - (fact     suggests: factorial ${1:0}$0

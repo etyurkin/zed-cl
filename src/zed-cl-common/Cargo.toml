@@ -12,6 +12,9 @@ thiserror = "1.0"
 tracing = "0.1"
 which = "8.0"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [lib]
 name = "common_rust"
 path = "src/lib.rs"

@@ -180,10 +180,11 @@ checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
 
 [[package]]
 name = "common-rust"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "lexpr",
+ "libc",
  "serde",
  "serde_json",
  "thiserror",
@@ -1336,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "zed-cl-indexer"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1352,7 +1353,7 @@ dependencies = [
 
 [[package]]
 name = "zed-cl-lsp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "bincode",

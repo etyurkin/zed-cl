@@ -4,7 +4,7 @@ use anyhow::Result;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use bytes::Bytes;
-use common_rust::{MasterReplClient, ReplRequest};
+use common_rust::{parse_lisp_completion_prefix, MasterReplClient, ReplRequest};
 use data_encoding::HEXLOWER;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -16,6 +16,21 @@ use zeromq::{Socket, SocketRecv, SocketSend};
 use crate::connection::ConnectionInfo;
 
 type HmacSha256 = Hmac<Sha256>;
+
+fn is_symbol_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(c, '-' | '*' | '+' | '/' | '<' | '>' | '=' | '_' | ':' | '&' | '%' | '!' | '?')
+}
+
+fn completion_span(code: &str, cursor_pos: usize) -> (usize, usize, String) {
+    let chars: Vec<char> = code.chars().collect();
+    let end = cursor_pos.min(chars.len());
+    let mut start = end;
+    while start > 0 && is_symbol_char(chars[start - 1]) {
+        start -= 1;
+    }
+    (start, end, chars[start..end].iter().collect())
+}
 
 /// Execution counter for kernel
 struct ExecutionState {
@@ -317,7 +332,7 @@ impl LispKernel {
             }
             "complete_request" => {
                 info!("Sending complete_reply");
-                self.send_complete_reply(shell, identities, header).await?;
+                self.send_complete_reply(shell, identities, header, _content).await?;
             }
             "shutdown_request" => {
                 info!("Sending shutdown_reply");
@@ -398,23 +413,11 @@ impl LispKernel {
         let code = content["code"].as_str().unwrap_or("");
         let silent = content["silent"].as_bool().unwrap_or(false);
 
-        // Extract file path from metadata
         let file_path = metadata["file_path"]
             .as_str()
             .or_else(|| metadata["cellId"].as_str())
             .or_else(|| metadata["source_file"].as_str())
             .map(|s| s.to_string());
-
-        let file_line = metadata["line"]
-            .as_u64()
-            .or_else(|| metadata["start_line"].as_u64())
-            .map(|l| l as u32);
-
-        let file_character = metadata["character"]
-            .as_u64()
-            .or_else(|| metadata["start_character"].as_u64())
-            .or_else(|| metadata["column"].as_u64())
-            .map(|c| c as u32);
 
         info!("Execute request - silent: {}, code length: {}", silent, code.len());
 
@@ -437,8 +440,6 @@ impl LispKernel {
             code: code.to_string(),
             package: None,
             file_path,
-            file_line,
-            file_character,
         };
 
         let result = {
@@ -577,12 +578,74 @@ impl LispKernel {
         socket: &mut Connection<zeromq::RouterSocket>,
         identities: &[Bytes],
         parent_header: &Value,
+        request: &Value,
     ) -> Result<()> {
+        let code = request["code"].as_str().unwrap_or("");
+        let cursor_pos = request["cursor_pos"].as_u64().unwrap_or(0) as usize;
+        let (cursor_start, cursor_end, prefix) = completion_span(code, cursor_pos);
+
+        let matches = if prefix.is_empty() {
+            Vec::new()
+        } else {
+            let (package, symbol_prefix) = parse_lisp_completion_prefix(&prefix);
+            let qualifier = if prefix.contains("::") {
+                "::"
+            } else if prefix.contains(':') && !prefix.starts_with(':') {
+                ":"
+            } else {
+                ""
+            };
+            let repl_request = ReplRequest::ListSymbols {
+                id: String::new(),
+                prefix: Some(symbol_prefix),
+                package: package.clone(),
+            };
+            let client = Arc::clone(&self.master_repl);
+            match tokio::task::spawn_blocking(move || {
+                client.blocking_write().send_request(repl_request)
+            })
+            .await
+            {
+                Ok(Ok(response)) => match response.data {
+                    common_rust::ResponseData::SymbolList { symbols } => symbols
+                        .into_iter()
+                        .map(|s| {
+                            if let Some(ref pkg) = package {
+                                if pkg.eq_ignore_ascii_case("KEYWORD") {
+                                    format!(":{}", s.symbol.to_lowercase())
+                                } else {
+                                    format!(
+                                        "{}{}{}",
+                                        pkg.to_lowercase(),
+                                        qualifier,
+                                        s.symbol.to_lowercase()
+                                    )
+                                }
+                            } else if s.package == "KEYWORD" {
+                                format!(":{}", s.symbol.to_lowercase())
+                            } else {
+                                s.symbol.to_lowercase()
+                            }
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                },
+                Ok(Err(e)) => {
+                    error!("Completion REPL error: {}", e);
+                    Vec::new()
+                }
+                Err(e) => {
+                    error!("Completion task error: {}", e);
+                    Vec::new()
+                }
+            }
+        };
+
         let content = json!({
             "status": "ok",
-            "matches": [],
-            "cursor_start": 0,
-            "cursor_end": 0,
+            "matches": matches,
+            "cursor_start": cursor_start,
+            "cursor_end": cursor_end,
             "metadata": {}
         });
 

@@ -84,6 +84,14 @@ impl UserIndexManager {
         }
     }
 
+    pub fn lookup_symbol(&self, symbol: &str) -> Result<Option<(PathBuf, u32, u32)>> {
+        if let Some(ref index) = self.index {
+            index.lookup_symbol(symbol)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Extract package from file content
     pub fn extract_package(text: &str) -> String {
         use zed_cl_indexer::SymbolExtractor;

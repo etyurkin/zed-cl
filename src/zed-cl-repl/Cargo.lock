@@ -43,10 +43,11 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "common-rust"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "lexpr",
+ "libc",
  "serde",
  "serde_json",
  "thiserror",
@@ -781,7 +782,7 @@ checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 
 [[package]]
 name = "zed-cl-repl-tui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "common-rust",

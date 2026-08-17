@@ -2,7 +2,7 @@
 
 use common_rust::{MasterReplClient, ReplRequest};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -17,6 +17,7 @@ pub struct LispLspBackend {
     client: Client,
     master_repl: Arc<RwLock<MasterReplClient>>,
     documents: Arc<RwLock<DocumentTracker>>,
+    extractor: Mutex<TreeSitterExtractor>,
     symbol_index: SharedSymbolIndex,
     user_index: Arc<RwLock<UserIndexManager>>,
     workspace_roots: Arc<RwLock<Vec<Url>>>,
@@ -58,6 +59,9 @@ impl LispLspBackend {
             client,
             master_repl: Arc::new(RwLock::new(MasterReplClient::new())),
             documents: Arc::new(RwLock::new(DocumentTracker::new())),
+            extractor: Mutex::new(
+                TreeSitterExtractor::new().expect("tree-sitter common lisp grammar"),
+            ),
             symbol_index,
             user_index,
             workspace_roots: Arc::new(RwLock::new(Vec::new())),
@@ -227,20 +231,19 @@ impl LispLspBackend {
 
         // If no workspace roots configured, accept all files (fallback)
         if workspace_roots.is_empty() {
-            info!("No workspace roots configured, accepting all files (file: {})", uri);
+            debug!("No workspace roots configured, accepting all files (file: {})", uri);
             return true;
         }
 
         let uri_str = uri.as_str();
 
-        // Check if URI starts with any workspace root
         for root in workspace_roots.iter() {
-            if uri_str.starts_with(root.as_str()) {
+            if uri_in_workspace_root(uri_str, root.as_str()) {
                 return true;
             }
         }
 
-        info!("File {} is outside workspace roots: {:?}", uri, *workspace_roots);
+        debug!("File {} is outside workspace roots: {:?}", uri, *workspace_roots);
         false
     }
 
@@ -374,198 +377,109 @@ impl LispLspBackend {
     }
 }
 
-/// Convert byte offset to LSP Position (line and character)
-/// SBCL provides character offset, we need to convert to line/character
-fn offset_to_position(source: &str, offset: usize) -> Position {
-    let mut line = 0;
-    let mut character = 0;
-
-    for (i, ch) in source.char_indices() {
-        if i >= offset {
+/// Convert a file byte/char offset to LSP Position without loading the rest of the file.
+fn offset_to_position_in_file(path: &std::path::Path, offset: usize) -> Option<Position> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut buf = [0u8; 4096];
+    let mut read = 0usize;
+    let mut line = 0u32;
+    let mut character = 0u32;
+    while read < offset {
+        let n = reader.read(&mut buf).ok()?;
+        if n == 0 {
             break;
         }
-        if ch == '\n' {
-            line += 1;
-            character = 0;
-        } else {
-            character += 1;
+        for &b in &buf[..n.min(offset - read)] {
+            if b == b'\n' {
+                line += 1;
+                character = 0;
+            } else {
+                character += 1;
+            }
+            read += 1;
         }
     }
+    Some(Position { line, character })
+}
 
-    Position {
-        line: line as u32,
-        character: character as u32,
+fn workspace_root_uri(uri: Url) -> Url {
+    let Ok(path) = uri.to_file_path() else {
+        return uri;
+    };
+    if path.is_dir() {
+        return uri;
+    }
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            Url::from_file_path(parent).unwrap_or(uri)
+        }
+        _ => uri,
     }
 }
 
+fn uri_in_workspace_root(uri: &str, root: &str) -> bool {
+    if uri == root {
+        return true;
+    }
+    let root = root.trim_end_matches('/');
+    uri.starts_with(root) && uri[root.len()..].starts_with('/')
+}
+
+fn is_system_lisp_path(path: &std::path::Path) -> bool {
+    let s = path.to_string_lossy();
+    s.contains("/sbcl/") || s.contains("\\sbcl\\") || s.contains("/lib/sbcl")
+}
+
+fn location_in_source_file(path: &str, symbol_name: &str) -> Option<Location> {
+    let path = std::path::Path::new(path);
+    if is_system_lisp_path(path) {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut extractor = TreeSitterExtractor::new().ok()?;
+    let pos = extractor
+        .find_definitions(&text)
+        .into_iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(symbol_name))
+        .map(|(_, p)| p)?;
+    let uri = Url::from_file_path(path).ok()?;
+    Some(Location {
+        uri,
+        range: Range {
+            start: pos,
+            end: pos,
+        },
+    })
+}
+
+fn indexed_location(path: std::path::PathBuf, line: u32, character: u32) -> Option<Location> {
+    let uri = Url::from_file_path(&path).ok()?;
+    Some(Location {
+        uri,
+        range: Range {
+            start: Position { line, character },
+            end: Position { line, character },
+        },
+    })
+}
+
 impl LispLspBackend {
-    /// Create Location from SBCL source file information
     fn create_external_location(
         &self,
         source_file: &str,
+        source_line: Option<u32>,
         source_character: Option<u32>,
-        symbol_name: &str,
-        symbol_kind: Option<&str>,
     ) -> Option<Location> {
-        // Convert file path to URI
         let path = std::path::Path::new(source_file);
         let uri = Url::from_file_path(path).ok()?;
 
-        // Read file content
-        let content = std::fs::read_to_string(path).ok()?;
-
-        // If we have a character offset, search for the symbol definition in nearby lines
-        if let Some(char_offset) = source_character {
-            let base_position = offset_to_position(&content, char_offset as usize);
-
-            // Search for symbol name within +/- 20 lines of the offset
-            let lines: Vec<&str> = content.lines().collect();
-            let start_line = base_position.line.saturating_sub(20) as usize;
-            let end_line = ((base_position.line + 20) as usize).min(lines.len());
-
-            let symbol_lower = symbol_name.to_lowercase();
-
-            // Build search patterns based on symbol kind
-            let search_patterns: Vec<String> = if let Some(kind) = symbol_kind {
-                match kind {
-                    "macro" => vec![
-                        format!("defmacro {}", symbol_lower),
-                        format!("sb-xc:defmacro {}", symbol_lower),
-                        format!("define-macro {}", symbol_lower),
-                    ],
-                    "function" => vec![
-                        format!("defun {}", symbol_lower),
-                        format!("sb-xc:defun {}", symbol_lower),
-                        format!("define-list-map {}", symbol_lower),
-                    ],
-                    "special-operator" => vec![
-                        format!("def-special-operator {}", symbol_lower),
-                        format!("defspecial {}", symbol_lower),
-                    ],
-                    "variable" | "constant" => vec![
-                        format!("defvar {}", symbol_lower),
-                        format!("defparameter {}", symbol_lower),
-                        format!("defconstant {}", symbol_lower),
-                    ],
-                    _ => vec![symbol_lower.clone()],
-                }
-            } else {
-                vec![symbol_lower.clone()]
+        if let Some(line) = source_line.filter(|l| *l > 0) {
+            let pos = Position {
+                line: line.saturating_sub(1),
+                character: 0,
             };
-
-            // Search for definition patterns first
-            for (line_idx, line) in lines[start_line..end_line].iter().enumerate() {
-                let actual_line = start_line + line_idx;
-                let line_lower = line.to_lowercase();
-
-                // Try to find definition patterns
-                for pattern in &search_patterns {
-                    if let Some(col) = line_lower.find(pattern) {
-                        // Find where the symbol name actually starts in the pattern
-                        let symbol_col = col + pattern.len() - symbol_lower.len();
-                        return Some(Location {
-                            uri: uri.clone(),
-                            range: Range {
-                                start: Position {
-                                    line: actual_line as u32,
-                                    character: symbol_col as u32
-                                },
-                                end: Position {
-                                    line: actual_line as u32,
-                                    character: symbol_col as u32
-                                },
-                            },
-                        });
-                    }
-                }
-            }
-
-            // If definition patterns not found nearby, search the entire file
-            // This helps when SBCL reports the wrong file or wrong offset
-            if !search_patterns.is_empty() {
-                for (line_idx, line) in lines.iter().enumerate() {
-                    let line_lower = line.to_lowercase();
-
-                    // Try to find definition patterns in the entire file
-                    for pattern in &search_patterns {
-                        if let Some(col) = line_lower.find(pattern) {
-                            // Find where the symbol name actually starts in the pattern
-                            let symbol_col = col + pattern.len() - symbol_lower.len();
-                            return Some(Location {
-                                uri: uri.clone(),
-                                range: Range {
-                                    start: Position {
-                                        line: line_idx as u32,
-                                        character: symbol_col as u32
-                                    },
-                                    end: Position {
-                                        line: line_idx as u32,
-                                        character: symbol_col as u32
-                                    },
-                                },
-                            });
-                        }
-                    }
-                }
-
-                // If we were looking for a specific definition pattern (like "defmacro cond")
-                // and didn't find it anywhere in the file, the source location is unreliable.
-                // Return None instead of a wrong location.
-                return None;
-            }
-
-            // Fallback: search for the symbol name as a complete word
-            for (line_idx, line) in lines[start_line..end_line].iter().enumerate() {
-                let actual_line = start_line + line_idx;
-                let line_lower = line.to_lowercase();
-
-                // Look for the symbol name as a complete word
-                if let Some(col) = line_lower.find(&symbol_lower) {
-                    // Check if it's a word boundary (not part of a larger word)
-                    let before_ok = col == 0 || !line.chars().nth(col.saturating_sub(1))
-                        .map(|c| c.is_alphanumeric() || c == '-' || c == '*' || c == '+')
-                        .unwrap_or(false);
-
-                    let after_idx = col + symbol_lower.len();
-                    let after_ok = after_idx >= line.len() || !line.chars().nth(after_idx)
-                        .map(|c| c.is_alphanumeric() || c == '-' || c == '*' || c == '+')
-                        .unwrap_or(false);
-
-                    if before_ok && after_ok {
-                        return Some(Location {
-                            uri: uri.clone(),
-                            range: Range {
-                                start: Position {
-                                    line: actual_line as u32,
-                                    character: col as u32
-                                },
-                                end: Position {
-                                    line: actual_line as u32,
-                                    character: col as u32
-                                },
-                            },
-                        });
-                    }
-                }
-            }
-
-            // If symbol not found nearby, use the offset position as-is
-            return Some(Location {
-                uri,
-                range: Range {
-                    start: base_position,
-                    end: base_position,
-                },
-            });
-        }
-
-        // Fallback to TreeSitter search if no character offset available
-        let mut extractor = TreeSitterExtractor::new().ok()?;
-        let definitions = extractor.find_definitions(&content);
-
-        // Look for matching symbol definition
-        if let Some((_, pos)) = definitions.into_iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(symbol_name)) {
             return Some(Location {
                 uri,
                 range: Range {
@@ -575,14 +489,18 @@ impl LispLspBackend {
             });
         }
 
-        // Last resort: start of file
-        Some(Location {
-            uri,
-            range: Range {
-                start: Position { line: 0, character: 0 },
-                end: Position { line: 0, character: 0 },
-            },
-        })
+        if let Some(char_offset) = source_character.filter(|c| *c > 0) {
+            let pos = offset_to_position_in_file(path, char_offset as usize)?;
+            return Some(Location {
+                uri,
+                range: Range {
+                    start: pos,
+                    end: pos,
+                },
+            });
+        }
+
+        None
     }
 
     fn hover_from_buffer(text: &str, position: Position, symbol_name: &str) -> Option<Hover> {
@@ -614,16 +532,18 @@ impl LanguageServer for LispLspBackend {
         // Store workspace roots for filtering user files
         if let Some(roots) = params.workspace_folders {
             let mut workspace_roots = self.workspace_roots.write().await;
-            *workspace_roots = roots.into_iter().map(|folder| folder.uri).collect();
+            *workspace_roots = roots
+                .into_iter()
+                .map(|folder| workspace_root_uri(folder.uri))
+                .collect();
             info!("Workspace roots: {:?}", *workspace_roots);
         } else if let Some(root_uri) = params.root_uri {
             let mut workspace_roots = self.workspace_roots.write().await;
-            workspace_roots.push(root_uri.clone());
-            info!("Workspace root: {:?}", root_uri);
+            workspace_roots.push(workspace_root_uri(root_uri));
+            info!("Workspace root: {:?}", workspace_roots.last());
         }
 
-        info!("Ensuring master REPL is running...");
-        self.master_repl.read().await.try_start_master_repl();
+        info!("Workspace ready; starting master REPL in background");
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -653,6 +573,10 @@ impl LanguageServer for LispLspBackend {
 
     async fn initialized(&self, _params: InitializedParams) {
         info!("LSP server initialized");
+        let client = Arc::clone(&self.master_repl);
+        tokio::task::spawn_blocking(move || {
+            client.blocking_write().try_start_master_repl();
+        });
         self.client
             .log_message(MessageType::INFO, "Common Lisp LSP server ready")
             .await;
@@ -677,7 +601,7 @@ impl LanguageServer for LispLspBackend {
 
         // Only index files within workspace (skip external files like SBCL sources)
         if !self.is_workspace_file(&uri).await {
-            info!("Skipping index for file outside workspace: {}", uri);
+            debug!("Skipping index for file outside workspace: {}", uri);
             return;
         }
 
@@ -708,7 +632,7 @@ impl LanguageServer for LispLspBackend {
 
         // Only index files within workspace (skip external files like SBCL sources)
         if !self.is_workspace_file(&uri).await {
-            info!("Skipping index for file outside workspace: {}", uri);
+            debug!("Skipping index for file outside workspace: {}", uri);
             return;
         }
 
@@ -745,63 +669,24 @@ impl LanguageServer for LispLspBackend {
         let position = params.text_document_position_params.position;
         self.notify_repl_file(&uri).await;
 
-        // Log to Zed's UI so we can see it
-        self.client
-            .log_message(
-                MessageType::INFO,
-                format!("Hover at line {} char {}", position.line, position.character),
-            )
-            .await;
-
         debug!("Hover request at {}:{}:{}", uri, position.line, position.character);
 
-        // Get document text
-        let documents = self.documents.read().await;
-        let text = match documents.get(&uri) {
-            Some(text) => text,
-            None => {
-                self.client.log_message(MessageType::INFO, "Document not found").await;
-                return Ok(None);
-            }
+        let (text, extraction_result) = {
+            let documents = self.documents.read().await;
+            let text = match documents.get(&uri) {
+                Some(text) => text.clone(),
+                None => return Ok(None),
+            };
+            let extraction_result = {
+                let mut extractor = self.extractor.lock().await;
+                extractor.symbol_with_package(&text, position)
+            };
+            (text, extraction_result)
         };
-
-        // Extract symbol at position
-        let mut extractor = match TreeSitterExtractor::new() {
-            Ok(e) => e,
-            Err(e) => {
-                self.client.log_message(MessageType::ERROR, format!("Tree-sitter error: {}", e)).await;
-                error!("Failed to create tree-sitter extractor: {}", e);
-                return Ok(None);
-            }
-        };
-
-        let extraction_result = extractor.symbol_with_package(text, position);
-
-        // Log the extraction result with debug info from extractor
-        self.client.log_message(
-            MessageType::INFO,
-            format!("Extraction result: {:?}", extraction_result)
-        ).await;
-
-        // Try to get the line for debugging
-        let lines: Vec<&str> = text.lines().collect();
-        if let Some(line) = lines.get(position.line as usize) {
-            self.client.log_message(
-                MessageType::INFO,
-                format!("Line {}: {}", position.line, line)
-            ).await;
-        }
 
         let (symbol_name, package_name) = match extraction_result {
-            Some((sym, pkg, parents)) => {
-                self.client.log_message(
-                    MessageType::INFO,
-                    format!("Found symbol: {} package: {:?}, parents: {:?}", sym, pkg, parents)
-                ).await;
-                (sym, pkg)
-            }
+            Some((sym, pkg, _parents)) => (sym, pkg),
             None => {
-                self.client.log_message(MessageType::INFO, "No symbol found at position").await;
                 debug!("No symbol found at position");
                 return Ok(None);
             }
@@ -872,7 +757,7 @@ impl LanguageServer for LispLspBackend {
                     }
                     ResponseData::Error { error } => {
                         debug!("Master REPL returned error: {}", error);
-                        Ok(Self::hover_from_buffer(text, position, &symbol_name))
+                        Ok(Self::hover_from_buffer(&text, position, &symbol_name))
                     }
                     _ => {
                         debug!("Unexpected response type");
@@ -882,7 +767,7 @@ impl LanguageServer for LispLspBackend {
             }
             Err(e) => {
                 error!("Failed to query master REPL: {}", e);
-                Ok(Self::hover_from_buffer(text, position, &symbol_name))
+                Ok(Self::hover_from_buffer(&text, position, &symbol_name))
             }
         }
     }
@@ -894,24 +779,20 @@ impl LanguageServer for LispLspBackend {
         debug!("Completion request at {}:{}:{}", uri, position.line, position.character);
 
         // Get document text
-        let documents = self.documents.read().await;
-        let text = match documents.get(&uri) {
-            Some(text) => text,
-            None => return Ok(None),
-        };
-
-        // Extract prefix being typed
-        let mut extractor = match TreeSitterExtractor::new() {
-            Ok(e) => e,
-            Err(e) => {
-                error!("Failed to create tree-sitter extractor: {}", e);
-                return Ok(None);
-            }
-        };
-
-        let prefix = match extractor.prefix_at_position(text, position) {
-            Some(p) => p,
-            None => return Ok(None),
+        let (text, prefix) = {
+            let documents = self.documents.read().await;
+            let text = match documents.get(&uri) {
+                Some(text) => text.clone(),
+                None => return Ok(None),
+            };
+            let prefix = {
+                let mut extractor = self.extractor.lock().await;
+                match extractor.prefix_at_position(&text, position) {
+                    Some(p) => p,
+                    None => return Ok(None),
+                }
+            };
+            (text, prefix)
         };
 
         debug!("Completion prefix: {}", prefix);
@@ -971,6 +852,13 @@ impl LanguageServer for LispLspBackend {
         let request = ReplRequest::ListSymbols {
             id: String::new(),
             prefix: Some(symbol_prefix.unwrap_or(prefix.clone())),
+            package: package_name.as_ref().map(|pkg| {
+                if pkg.is_empty() {
+                    "KEYWORD".to_string()
+                } else {
+                    pkg.clone()
+                }
+            }),
         };
 
         match self.send_repl(request).await {
@@ -1015,38 +903,17 @@ impl LanguageServer for LispLspBackend {
 
                         // Filter symbols by package if specified, OR by prefix matching
                         let filtered_symbols: Vec<_> = if let Some(ref pkg) = package_name {
-                            // Empty package ("") means keywords - show symbols from KEYWORD package
                             if pkg.is_empty() {
                                 symbols.into_iter()
                                     .filter(|info| info.package.eq_ignore_ascii_case("KEYWORD"))
                                     .collect()
                             } else {
-                                // User typed "pkg::" - show only symbols from that package
                                 symbols.into_iter()
                                     .filter(|info| info.package.eq_ignore_ascii_case(pkg))
                                     .collect()
                             }
                         } else {
-                            // No package qualifier - include:
-                            // 1. Symbols whose name starts with prefix
-                            // 2. ALL symbols from packages whose name starts with prefix
-                            let prefix_upper = prefix.to_uppercase();
-                            let mut matching_packages = std::collections::HashSet::new();
-
-                            // Find packages that match the prefix
-                            for sym_info in &symbols {
-                                if sym_info.package.to_uppercase().starts_with(&prefix_upper) {
-                                    matching_packages.insert(sym_info.package.clone());
-                                }
-                            }
-
-                            symbols.into_iter()
-                                .filter(|info| {
-                                    // Include if symbol name matches OR package matches
-                                    info.symbol.to_uppercase().starts_with(&prefix_upper) ||
-                                    matching_packages.contains(&info.package)
-                                })
-                                .collect()
+                            symbols
                         };
 
                         // Debug: log first 5 symbols to see the order from REPL
@@ -1221,184 +1088,75 @@ impl LanguageServer for LispLspBackend {
     ) -> Result<Option<GotoDefinitionResponse>> {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
+        debug!("Definition request at {} {}", position.line, position.character);
 
-        self.client
-            .log_message(
-                MessageType::INFO,
-                format!("Definition request at {}:{}", position.line, position.character),
-            )
-            .await;
-
-        // Get document text
-        let documents = self.documents.read().await;
-        let text = match documents.get(&uri) {
-            Some(text) => text,
-            None => {
-                self.client.log_message(MessageType::INFO, "Document not found for goto_definition").await;
-                return Ok(None);
-            }
-        };
-        self.client.log_message(MessageType::INFO, format!("Got document text, length: {}", text.len())).await;
-
-        // Extract symbol at cursor position
-        let mut extractor = match TreeSitterExtractor::new() {
-            Ok(e) => e,
-            Err(e) => {
-                self.client.log_message(MessageType::ERROR, format!("Failed to create extractor: {}", e)).await;
-                return Ok(None);
+        let (text, symbol_name, package_name) = {
+            let documents = self.documents.read().await;
+            let text = match documents.get(&uri) {
+                Some(text) => text.clone(),
+                None => return Ok(None),
+            };
+            let extracted = {
+                let mut extractor = self.extractor.lock().await;
+                extractor.symbol_with_package(&text, position)
+            };
+            match extracted {
+                Some((sym, pkg, _)) => (text, sym, pkg),
+                None => return Ok(None),
             }
         };
 
-        self.client.log_message(MessageType::INFO, "Created TreeSitter extractor").await;
-
-        let (symbol_name, package_name) = match extractor.symbol_with_package(text, position) {
-            Some((sym, pkg, _)) => (sym, pkg),
-            None => {
-                self.client.log_message(MessageType::INFO, "No symbol found at position").await;
-                return Ok(None);
-            }
-        };
-
-        self.client.log_message(MessageType::INFO, format!("Looking for definition of: {} in package: {:?}", symbol_name, package_name)).await;
-
-        // TIER 0a: Try user index first (smaller, user's code)
         if let Some(ref pkg) = package_name {
-            self.client.log_message(MessageType::INFO, format!("Searching user index for {}::{}...", pkg, symbol_name)).await;
-
             let user_index = self.user_index.read().await;
             match user_index.lookup(pkg, &symbol_name) {
                 Ok(Some((path, line, character))) => {
-                    if let Ok(uri) = Url::from_file_path(&path) {
-                        self.client.log_message(MessageType::INFO, format!("Found in user index: {:?}", path)).await;
-                        return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                            uri,
-                            range: Range {
-                                start: Position { line, character },
-                                end: Position { line, character },
-                            },
-                        })));
+                    if let Some(location) = indexed_location(path, line, character) {
+                        return Ok(Some(GotoDefinitionResponse::Scalar(location)));
                     }
                 }
-                Ok(None) => {
-                    self.client.log_message(MessageType::INFO, "Not found in user index").await;
+                Ok(None) => {}
+                Err(e) => error!("User index lookup error: {}", e),
+            }
+        }
+        {
+            let user_index = self.user_index.read().await;
+            match user_index.lookup_symbol(&symbol_name) {
+                Ok(Some((path, line, character))) => {
+                    if let Some(location) = indexed_location(path, line, character) {
+                        return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+                    }
                 }
-                Err(e) => {
-                    self.client.log_message(MessageType::ERROR, format!("User index lookup error: {}", e)).await;
-                }
+                Ok(None) => {}
+                Err(e) => error!("User index lookup error: {}", e),
             }
         }
 
-        // TIER 0b: Try SBCL/library index (pre-indexed symbols)
-        // For SBCL symbols, try both the specified package and SB-IMPL (where many CL symbols are actually defined)
         let packages_to_try: Vec<&str> = if let Some(ref pkg) = package_name {
             vec![pkg.as_str()]
         } else {
-            // No package specified - try COMMON-LISP first, then SB-IMPL (SBCL internal)
             vec!["COMMON-LISP", "SB-IMPL"]
         };
 
         for pkg in packages_to_try {
-            self.client.log_message(MessageType::INFO, format!("Searching SBCL index for {}::{}...", pkg, symbol_name)).await;
-
             let index = self.symbol_index.read().await;
             match index.lookup(pkg, &symbol_name) {
                 Ok(Some(location)) => {
-                    self.client.log_message(MessageType::INFO, format!("Found in SBCL index: {:?}", location)).await;
                     return Ok(Some(GotoDefinitionResponse::Scalar(location)));
                 }
-                Ok(None) => {
-                    self.client.log_message(MessageType::INFO, format!("Not found in SBCL index for package {}", pkg)).await;
-                }
-                Err(e) => {
-                    self.client.log_message(MessageType::ERROR, format!("SBCL index lookup error: {}", e)).await;
-                }
+                Ok(None) => {}
+                Err(e) => error!("SBCL index lookup error: {}", e),
             }
         }
 
-        // TIER 1: Try local definition (fast, no REPL query needed)
-        self.client.log_message(MessageType::INFO, "Searching local definitions...").await;
-
-        // Search manually here so we can log
-        let mut extractor = match TreeSitterExtractor::new() {
-            Ok(e) => e,
-            Err(e) => {
-                self.client.log_message(MessageType::ERROR, format!("Failed to create extractor: {}", e)).await;
-                self.client.log_message(MessageType::INFO, "Not found locally, querying REPL...").await;
-                // Skip to REPL query
-                let request = ReplRequest::SymbolInfo {
-                    id: String::new(),
-                    symbol: symbol_name.clone(),
-                    package: package_name,
-                };
-
-                self.client.log_message(MessageType::INFO, format!("Sending REPL request for symbol: {}", symbol_name)).await;
-
-                match self.send_repl(request).await {
-                    Ok(response) => {
-                        self.client.log_message(MessageType::INFO, "Got REPL response").await;
-                        use common_rust::ResponseData;
-                        match response.data {
-                            ResponseData::SymbolInfo(info) => {
-                                self.client.log_message(MessageType::INFO, format!("SymbolInfo: source_file={:?}, source_char={:?}", info.source_file, info.source_character)).await;
-                                if let Some(ref source_file) = info.source_file {
-                                    // Check for non-empty source file
-                                    if !source_file.is_empty() {
-                                        self.client.log_message(MessageType::INFO, format!("Found external definition in {}", source_file)).await;
-                                        if let Some(location) =
-                                            self.create_external_location(source_file, info.source_character, &symbol_name, Some(&info.kind))
-                                        {
-                                            self.client.log_message(MessageType::INFO, format!("Returning location: {:?}", location)).await;
-                                            return Ok(Some(GotoDefinitionResponse::Scalar(location)));
-                                        }
-                                        self.client.log_message(MessageType::INFO, "create_external_location returned None").await;
-                                    } else {
-                                        self.client.log_message(MessageType::INFO, "Source file is empty - symbol was evaluated without file context").await;
-                                    }
-                                }
-                                self.client.log_message(MessageType::INFO, "Symbol info found but no source location").await;
-                                return Ok(None);
-                            }
-                            ResponseData::Error { error } => {
-                                self.client.log_message(MessageType::ERROR, format!("Master REPL returned error: {}", error)).await;
-                                return Ok(None);
-                            }
-                            _ => {
-                                self.client.log_message(MessageType::INFO, "Unexpected response type").await;
-                                return Ok(None);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        self.client.log_message(MessageType::ERROR, format!("Failed to query master REPL: {}", e)).await;
-                        return Ok(None);
-                    }
-                }
-            }
+        let local_pos = {
+            let mut extractor = self.extractor.lock().await;
+            extractor
+                .find_definitions(&text)
+                .into_iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&symbol_name))
+                .map(|(_, pos)| pos)
         };
-
-        self.client.log_message(MessageType::INFO, "TreeSitter extractor created successfully").await;
-
-        // Try to parse the source
-        let tree = extractor.parse(text);
-        if tree.is_none() {
-            self.client.log_message(MessageType::ERROR, "TreeSitter parse returned None!").await;
-        } else {
-            self.client.log_message(MessageType::INFO, "TreeSitter parse successful").await;
-        }
-
-        let definitions = extractor.find_definitions(text);
-        self.client.log_message(MessageType::INFO, format!("Found {} definitions in file", definitions.len())).await;
-
-        let def_names: Vec<String> = definitions.iter().map(|(n, _)| n.clone()).collect();
-        self.client.log_message(MessageType::INFO, format!("Definition names: {:?}", def_names)).await;
-        self.client.log_message(MessageType::INFO, format!("Looking for: {}", symbol_name)).await;
-
-        let found_def = definitions.into_iter().find(|(name, _)| {
-            name.eq_ignore_ascii_case(&symbol_name)
-        });
-
-        if let Some((found_name, local_pos)) = found_def {
-            self.client.log_message(MessageType::INFO, format!("Matched '{}' -> position {:?}", found_name, local_pos)).await;
+        if let Some(local_pos) = local_pos {
             return Ok(Some(GotoDefinitionResponse::Scalar(Location {
                 uri: uri.clone(),
                 range: Range {
@@ -1408,56 +1166,84 @@ impl LanguageServer for LispLspBackend {
             })));
         }
 
-        self.client.log_message(MessageType::INFO, "Not found locally, querying REPL...").await;
-
-        // TIER 2: Not found locally - query master REPL for external definition
         let request = ReplRequest::SymbolInfo {
             id: String::new(),
             symbol: symbol_name.clone(),
             package: package_name,
         };
 
-        self.client.log_message(MessageType::INFO, format!("Sending REPL request for symbol: {}", symbol_name)).await;
-
         match self.send_repl(request).await {
             Ok(response) => {
-                self.client.log_message(MessageType::INFO, "Got REPL response").await;
                 use common_rust::ResponseData;
                 match response.data {
                     ResponseData::SymbolInfo(info) => {
-                        self.client.log_message(MessageType::INFO, format!("SymbolInfo: source_file={:?}, source_char={:?}", info.source_file, info.source_character)).await;
                         if let Some(ref source_file) = info.source_file {
-                            // Check for non-empty source file
                             if !source_file.is_empty() {
-                                self.client.log_message(MessageType::INFO, format!("Found external definition in {}", source_file)).await;
-                                if let Some(location) =
-                                    self.create_external_location(source_file, info.source_character, &symbol_name, Some(&info.kind))
-                                {
-                                    self.client.log_message(MessageType::INFO, format!("Returning location: {:?}", location)).await;
+                                if let Some(location) = self.create_external_location(
+                                    source_file,
+                                    info.source_line,
+                                    info.source_character,
+                                ) {
                                     return Ok(Some(GotoDefinitionResponse::Scalar(location)));
                                 }
-                                self.client.log_message(MessageType::INFO, "create_external_location returned None").await;
-                            } else {
-                                self.client.log_message(MessageType::INFO, "Source file is empty - symbol was evaluated without file context").await;
+                                if let Some(location) =
+                                    location_in_source_file(source_file, &symbol_name)
+                                {
+                                    return Ok(Some(GotoDefinitionResponse::Scalar(location)));
+                                }
                             }
                         }
-                        self.client.log_message(MessageType::INFO, "Symbol info found but no source location").await;
                         Ok(None)
                     }
                     ResponseData::Error { error } => {
-                        self.client.log_message(MessageType::ERROR, format!("Master REPL returned error: {}", error)).await;
+                        error!("Master REPL returned error: {}", error);
                         Ok(None)
                     }
-                    _ => {
-                        self.client.log_message(MessageType::INFO, "Unexpected response type").await;
-                        Ok(None)
-                    }
+                    _ => Ok(None),
                 }
             }
             Err(e) => {
-                self.client.log_message(MessageType::ERROR, format!("Failed to query master REPL: {}", e)).await;
+                error!("Failed to query master REPL: {}", e);
                 Ok(None)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_file_uri_uses_parent_directory() {
+        let dir = std::env::temp_dir();
+        let file = dir.join("zed-cl-ws-root-test.lisp");
+        std::fs::write(&file, "()").unwrap();
+        let uri = Url::from_file_path(&file).unwrap();
+        let root = workspace_root_uri(uri);
+        assert_eq!(root.to_file_path().unwrap(), dir);
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn workspace_match_requires_path_separator() {
+        assert!(uri_in_workspace_root(
+            "file:///tmp/examples/foo.lisp",
+            "file:///tmp/examples"
+        ));
+        assert!(!uri_in_workspace_root(
+            "file:///tmp/examples-extra/foo.lisp",
+            "file:///tmp/examples"
+        ));
+    }
+
+    #[test]
+    fn location_in_source_file_finds_defun() {
+        let dir = std::env::temp_dir();
+        let file = dir.join("zed-cl-goto-test.lisp");
+        std::fs::write(&file, ";;; header\n(defun multiply-numbers (a b)\n  (* a b))\n").unwrap();
+        let loc = location_in_source_file(file.to_str().unwrap(), "multiply-numbers").unwrap();
+        assert_eq!(loc.range.start.line, 1);
+        let _ = std::fs::remove_file(&file);
     }
 }

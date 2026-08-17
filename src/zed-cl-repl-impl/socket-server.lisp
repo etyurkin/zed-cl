@@ -1,4 +1,5 @@
 ;;;; TCP localhost server for Master REPL (SBCL inet sockets; macOS, Linux, Windows).
+;;;; Frames are 4-byte big-endian UTF-8 length followed by that many bytes of a printed sexp.
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (require :sb-bsd-sockets))
@@ -10,6 +11,8 @@
                 #:write-connection-file
                 #:read-connection-file)
   (:export #:start-socket-server
+           #:write-frame
+           #:read-frame
            #:*running*))
 
 (in-package :zed-cl.socket-server)
@@ -18,6 +21,8 @@
   "Server running flag")
 
 (defparameter *bind-host* "127.0.0.1")
+
+(defconstant +max-frame-octets+ (* 32 1024 1024))
 
 (defun log-message (format-string &rest args)
   "Log a message to stderr"
@@ -69,25 +74,76 @@
 (defun make-client-stream (socket)
   (sb-bsd-sockets:socket-make-stream
    socket
-   :element-type 'character
+   :element-type '(unsigned-byte 8)
    :input t
    :output t
-   :buffering :line))
+   :buffering :full))
 
-(defun read-message (stream)
-  (handler-case
-      (read stream nil :eof)
-    (end-of-file () :eof)
-    (error (e)
-      (log-message "Error reading message: ~A" e)
-      :eof)))
+(defun string-to-utf8 (string)
+  #+sbcl (sb-ext:string-to-octets string :external-format :utf-8)
+  #+ecl (ext:string-to-octets string :external-format :utf-8)
+  #-(or sbcl ecl)
+  (map '(simple-array (unsigned-byte 8) (*)) #'char-code string))
+
+(defun utf8-to-string (octets)
+  #+sbcl (sb-ext:octets-to-string octets :external-format :utf-8)
+  #+ecl (ext:octets-to-string octets :external-format :utf-8)
+  #-(or sbcl ecl)
+  (map 'string #'code-char octets))
+
+(defun write-u32-be (stream n)
+  (write-byte (ldb (byte 8 24) n) stream)
+  (write-byte (ldb (byte 8 16) n) stream)
+  (write-byte (ldb (byte 8 8) n) stream)
+  (write-byte (ldb (byte 8 0) n) stream))
+
+(defun read-u32-be (stream)
+  (let ((b0 (read-byte stream nil nil)))
+    (unless b0
+      (return-from read-u32-be nil))
+    (let ((b1 (read-byte stream nil nil))
+          (b2 (read-byte stream nil nil))
+          (b3 (read-byte stream nil nil)))
+      (unless (and b1 b2 b3)
+        (return-from read-u32-be nil))
+      (logior (ash b0 24) (ash b1 16) (ash b2 8) b3))))
+
+(defun write-frame (stream message)
+  (let* ((text (with-output-to-string (out)
+                 (prin1 message out)))
+         (octets (string-to-utf8 text))
+         (len (length octets)))
+    (when (> len +max-frame-octets+)
+      (error "Frame too large: ~D bytes" len))
+    (write-u32-be stream len)
+    (write-sequence octets stream)
+    (finish-output stream)
+    t))
+
+(defun read-frame (stream)
+  (let ((len (read-u32-be stream)))
+    (cond
+      ((null len) :eof)
+      ((> len +max-frame-octets+)
+       (log-message "Frame too large: ~D" len)
+       :eof)
+      (t
+       (let ((octets (make-array len :element-type '(unsigned-byte 8))))
+         (let ((got (read-sequence octets stream)))
+           (unless (= got len)
+             (return-from read-frame :eof)))
+         (handler-case
+             (read-from-string (utf8-to-string octets))
+           (error (e)
+             (log-message "Error reading message: ~A" e)
+             :eof)))))))
 
 (defun handle-client (client-socket message-handler)
   (let ((stream (make-client-stream client-socket)))
     (log-message "Client connected")
     (unwind-protect
          (loop while *running* do
-           (let ((message (read-message stream)))
+           (let ((message (read-frame stream)))
              (when (eq message :eof)
                (log-message "Client disconnected")
                (return))

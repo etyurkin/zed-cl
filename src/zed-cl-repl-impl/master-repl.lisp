@@ -17,6 +17,8 @@
                 #:getenv
                 #:system-package-p
                 #:with-source-tracking)
+  (:import-from :zed-cl.socket-server
+                #:write-frame)
   (:export #:start-master-repl))
 
 (in-package :zed-cl.master-repl)
@@ -27,8 +29,13 @@
   "Is master REPL running?")
 
 (defvar *current-file* nil)
-(defvar *known-files* nil)
 
+(defvar *request-lock*
+  #+sbcl (sb-thread:make-mutex :name "zed-cl-request")
+  #+ecl (mp:make-lock)
+  #-(or sbcl ecl) nil)
+
+(defparameter *max-completion-symbols* 500)
 
 ;;;; Initialize package whitelist
 (unless (listp *completion-package-whitelist*)
@@ -39,18 +46,13 @@
 
 (defun log-error (format-string &rest args)
   "Log to error output"
-  (apply #'format *error-output* 
+  (apply #'format *error-output*
          (concatenate 'string "~&[Master] " format-string "~%") args)
   (force-output *error-output*))
 
 (defun write-message (stream message)
-  "Write a message to stream as s-expression"
   (handler-case
-      (progn
-        (prin1 message stream)
-        (write-char #\Newline stream)
-        (force-output stream)
-        t)
+      (zed-cl.socket-server:write-frame stream message)
     (error (e) (log-error "Error writing message: ~A" e) nil)))
 
 ;;;; Symbol Classification
@@ -61,16 +63,6 @@
     (let ((pkg-name (package-name pkg)))
       (not (or (zed-cl.compat:system-package-p pkg-name)
                (string= pkg-name "ZED-CL"))))))
-
-(defun whitelisted-package-name-p (pkg-name)
-  "Check if a package name (string) is whitelisted"
-  (cond
-    ((eq *completion-package-whitelist* :unset)
-     (let ((pkg (find-package pkg-name)))
-       (and pkg (user-package-p pkg))))
-    ((listp *completion-package-whitelist*)
-     (member pkg-name *completion-package-whitelist* :test #'string=))
-    (t nil)))
 
 (defun core-keyword-p (keyword-symbol)
   "Check if a keyword is a 'core' keyword (not from system packages)"
@@ -142,20 +134,6 @@
         (is-keyword-package "variable")
         (t nil)))
 
-(defun get-symbol-source (sym)
-  "Get source code representation for symbol"
-  (handler-case
-      (let ((def (get-lambda-list sym)))
-        (format nil "(defun ~A ~A)" (string-downcase (symbol-name sym)) def))
-    (error () nil)))
-
-(defun should-collect-symbol-p (is-keyword-package is-user-package
-                                 is-cl-package has-definition key seen sym)
-  "Check if symbol should be included in collection"
-  (and (not (gethash key seen))
-       (or is-keyword-package is-user-package is-cl-package has-definition)
-       (or (not is-keyword-package) (whitelisted-keyword-p sym))))
-
 (defun remap-sbcl-source-path (path-string)
   "Remap SBCL source paths from build directory to installed location"
   (let ((sbcl-home (getenv "SBCL_HOME")))
@@ -168,8 +146,8 @@
                  (paths-to-try (list
                                 (concatenate 'string sbcl-home relative-path)
                                 (concatenate 'string
-                                            (subseq sbcl-home 0 (search "/lib/sbcl" sbcl-home))
-                                            "/share/sbcl" relative-path))))
+                                             (subseq sbcl-home 0 (search "/lib/sbcl" sbcl-home))
+                                             "/share/sbcl" relative-path))))
             (dolist (try-path paths-to-try)
               (let ((probe-result (probe-file try-path)))
                 (when probe-result
@@ -178,66 +156,15 @@
   path-string)
 
 (defun get-source-location-for-symbol (sym)
-  "Extract source file location for symbol (implementation-specific)"
-  ;; Use compat layer for base introspection
   (let ((location (zed-cl.compat:get-source-location sym)))
     (when location
-      ;; Apply SBCL-specific path remapping if needed
-      (let ((path (first location))
+      (let ((path (remap-sbcl-source-path (first location)))
             (line (second location))
             (char (third location)))
         (when path
-          (list (remap-sbcl-source-path path) line char))))))
-
-(defun collect-symbol-info (sym pkg is-keyword-package is-cl-package kind)
-  "Create symbol info plist"
-  (declare (ignore is-keyword-package is-cl-package))
-  (let* ((source (when (or (fboundp sym) (special-operator-p sym))
-                   (if (member kind '("function" "special-operator" "macro") :test #'string=)
-                       (get-symbol-source sym)
-                       nil)))
-         (param-types (when (and (fboundp sym) (string= kind "function"))
-                       (get-parameter-types sym)))
-         (source-loc (get-source-location-for-symbol sym)))
-    (when kind
-      (append (list :symbol (symbol-name sym)
-                   :kind kind
-                   :package (package-name pkg)
-                   :source source)
-              (when param-types (list :param-types param-types))
-              (when source-loc
-                (list :source-file (first source-loc)
-                      :source-line (second source-loc)
-                      :source-character (third source-loc)))))))
-
-(defun process-symbol (sym pkg seen)
-  "Process a symbol and return its info if it should be collected"
-  (let* ((pkg-name (package-name pkg))
-         (is-keyword-package (string= pkg-name "KEYWORD"))
-         (is-cl-package (string= pkg-name "COMMON-LISP"))
-         (is-user-package (user-package-p pkg))
-         (has-definition (or (fboundp sym) (boundp sym) (special-operator-p sym)))
-         (key (cons pkg-name (symbol-name sym))))
-    (when (should-collect-symbol-p is-keyword-package is-user-package
-                                    is-cl-package has-definition key seen sym)
-      (setf (gethash key seen) t)
-      (collect-symbol-info sym pkg is-keyword-package is-cl-package
-                          (symbol-kind sym is-cl-package is-keyword-package)))))
-
-(defun collect-user-symbols ()
-  "Collect all symbols from whitelisted packages"
-  (log-error "Whitelist: ~S" *completion-package-whitelist*)
-  (let ((symbols nil)
-        (seen (make-hash-table :test 'equal)))
-    (do-all-symbols (sym)
-      (let ((pkg (symbol-package sym)))
-        (when (and pkg
-                   (eq (symbol-package sym) pkg)
-                   (whitelisted-package-p pkg))
-          (let ((info (process-symbol sym pkg seen)))
-            (when info (push info symbols))))))
-    (log-error "Collected ~D symbols" (length symbols))
-    symbols))
+          (list path
+                (and (integerp line) (plusp line) line)
+                (and (integerp char) (plusp char) char)))))))
 
 ;;;; Package Information
 
@@ -273,6 +200,83 @@
               :doc (build-package-doc nicknames pkg-doc symbol-count)
               :source (format nil "(in-package :~A)" (string-downcase package-name)))))))
 
+(defun prefix-matches (name prefix)
+  (or (zerop (length prefix))
+      (and (>= (length name) (length prefix))
+           (string= prefix name :end2 (length prefix)))))
+
+(defun parse-completion-query (prefix package-name)
+  (let* ((raw (string-upcase (or prefix "")))
+         (pkg-arg (and package-name (string-upcase (string package-name)))))
+    (cond
+      ((and pkg-arg (plusp (length pkg-arg)))
+       (values pkg-arg
+               (if (and (plusp (length raw)) (char= (char raw 0) #\:))
+                   (subseq raw 1)
+                   raw)))
+      (t
+       (let ((double (search "::" raw)))
+         (cond
+           (double
+            (values (subseq raw 0 double) (subseq raw (+ double 2))))
+           ((and (plusp (length raw)) (char= (char raw 0) #\:))
+            (values "KEYWORD" (subseq raw 1)))
+           (t
+            (let ((colon (position #\: raw)))
+              (if colon
+                  (values (subseq raw 0 colon) (subseq raw (1+ colon)))
+                  (values nil raw))))))))))
+
+(defun collect-symbol-info-light (sym pkg kind)
+  (when kind
+    (list :symbol (symbol-name sym)
+          :kind kind
+          :package (package-name pkg))))
+
+(defun collect-matching-symbols (prefix &optional package-name)
+  (multiple-value-bind (pkg-name prefix-upper)
+      (parse-completion-query prefix package-name)
+    (let ((symbols nil)
+          (count 0)
+          (seen (make-hash-table :test 'equal)))
+      (labels ((add-from-package (pkg)
+                 (let ((this-name (package-name pkg)))
+                   (do-symbols (sym pkg)
+                     (when (>= count *max-completion-symbols*)
+                       (return))
+                     (when (and (eq (symbol-package sym) pkg)
+                                (prefix-matches (symbol-name sym) prefix-upper))
+                       (let ((key (cons this-name (symbol-name sym)))
+                             (kind (symbol-kind
+                                    sym
+                                    (string= this-name "COMMON-LISP")
+                                    (string= this-name "KEYWORD"))))
+                         (when (and kind
+                                    (not (gethash key seen))
+                                    (or (not (string= this-name "KEYWORD"))
+                                        (whitelisted-keyword-p sym)))
+                           (setf (gethash key seen) t)
+                           (let ((info (collect-symbol-info-light sym pkg kind)))
+                             (when info
+                               (push info symbols)
+                               (incf count))))))))))
+        (if pkg-name
+            (let ((pkg (find-package pkg-name)))
+              (when pkg
+                (add-from-package pkg)))
+            (dolist (pkg (list-all-packages))
+              (when (and (< count *max-completion-symbols*)
+                         (whitelisted-package-p pkg))
+                (let ((this-name (package-name pkg)))
+                  (when (and (plusp (length prefix-upper))
+                             (prefix-matches this-name prefix-upper))
+                    (let ((info (get-package-info this-name)))
+                      (when info
+                        (push info symbols)
+                        (incf count))))
+                  (add-from-package pkg))))))
+      symbols)))
+
 ;;;; Symbol Information
 
 (defun find-symbol-in-user-packages (symbol-name)
@@ -289,8 +293,8 @@
 (defun find-symbol-by-name (symbol-name package-name)
   "Find symbol by name, optionally in specific package"
   (if package-name
-      (find-symbol (string-upcase symbol-name) 
-                  (find-package (string-upcase package-name)))
+      (find-symbol (string-upcase symbol-name)
+                   (find-package (string-upcase package-name)))
       (or (find-symbol (string-upcase symbol-name) :cl)
           (find-symbol-in-user-packages symbol-name))))
 
@@ -332,26 +336,28 @@
          (doc (get-symbol-doc sym kind))
          (source (get-symbol-source-info sym kind symbol-name))
          (param-types (when (and (fboundp sym) (string= kind "function"))
-                       (get-parameter-types sym)))
+                        (get-parameter-types sym)))
          (source-loc (get-source-location-for-symbol sym)))
     (when kind
       (append (list :symbol symbol-name
-                   :kind kind
-                   :package (package-name pkg)
-                   :doc doc
-                   :source (or source
-                              (format nil "(~A ~A ...)"
-                                     (cond ((string= kind "function") "defun")
-                                           ((string= kind "macro") "defmacro")
-                                           ((string= kind "special-operator") "special-operator")
-                                           ((string= kind "variable") "defvar")
-                                           (t "def"))
-                                     (string-downcase symbol-name))))
+                    :kind kind
+                    :package (package-name pkg)
+                    :doc doc
+                    :source (or source
+                                (format nil "(~A ~A ...)"
+                                        (cond ((string= kind "function") "defun")
+                                              ((string= kind "macro") "defmacro")
+                                              ((string= kind "special-operator") "special-operator")
+                                              ((string= kind "variable") "defvar")
+                                              (t "def"))
+                                        (string-downcase symbol-name))))
               (when param-types (list :param-types param-types))
               (when source-loc
-                (list :source-file (first source-loc)
-                      :source-line (second source-loc)
-                      :source-character (third source-loc)))))))
+                (append (list :source-file (first source-loc))
+                        (when (second source-loc)
+                          (list :source-line (second source-loc)))
+                        (when (third source-loc)
+                          (list :source-character (third source-loc)))))))))
 
 (defun get-symbol-info (symbol-name &optional package-name)
   "Get detailed information about a symbol including source and documentation"
@@ -385,109 +391,27 @@
   (when (fboundp 'zed-cl::get-display-outputs)
     (funcall 'zed-cl::get-display-outputs)))
 
-
-(defun incomplete-code-p (code)
-  (handler-case
-      (progn
-        (with-input-from-string (in code)
-          (loop for form = (read in nil :eof)
-                until (eq form :eof)))
-        nil)
-    (end-of-file () t)
-    (error () nil)))
-
-(defun slurp-file (path)
-  (with-open-file (in path :direction :input :if-does-not-exist nil)
-    (unless in
-      (return-from slurp-file nil))
-    (let ((buf (make-array 4096 :element-type 'character)))
-      (with-output-to-string (out)
-        (loop for n = (read-sequence buf in)
-              until (zerop n)
-              do (write-sequence buf out :end n))))))
-
-(defun top-level-form-start (text idx)
-  (loop for i from (min idx (max 0 (1- (length text)))) downto 0
-        when (and (char= (char text i) #\()
-                  (or (zerop i)
-                      (member (char text (1- i)) '(#\Newline #\Return))))
-        return i))
-
-(defun eval-operator-forms-before (text end operator)
-  (let ((needle (concatenate 'string "(" operator))
-        (start 0))
-    (loop
-      (let ((pos (search needle text :start2 start :end2 end :test #'char-equal)))
-        (unless pos
-          (return))
-        (with-input-from-string (in text :start pos)
-          (let ((form (ignore-errors (read in nil nil))))
-            (when (and (consp form)
-                       (symbolp (first form))
-                       (string-equal (symbol-name (first form)) operator))
-              (ignore-errors (eval form)))))
-        (setf start (1+ pos))))))
-
-(defun expand-incomplete-in-file (code path)
-  (let* ((text (slurp-file path))
-         (needle (string-trim '(#\Space #\Tab #\Newline #\Return) code)))
-    (when (or (null text) (zerop (length needle)))
-      (return-from expand-incomplete-in-file nil))
-    (let ((idx (search needle text)))
-      (unless idx
-        (return-from expand-incomplete-in-file nil))
-      (let ((start (or (top-level-form-start text idx) idx)))
-        (let ((*package* *package*))
-          (eval-operator-forms-before text start "defpackage")
-          (eval-operator-forms-before text start "in-package")
-          (with-input-from-string (in text :start start)
-            (handler-case (read in nil nil)
-              (error () nil))))))))
-
-(defun candidate-source-paths (preferred)
-  (delete-duplicates
-   (append (when preferred (list preferred))
-           (when *current-file* (list *current-file*))
-           *known-files*)
-   :test #'equal
-   :from-end t))
-
-(defun expand-incomplete-form (code &optional preferred-path)
-  (dolist (path (candidate-source-paths preferred-path))
-    (let ((form (expand-incomplete-in-file code path)))
-      (when form
-        (return (values form path))))))
-
 (defun eval-one-form (form &optional file-path)
   (if file-path
       (with-source-tracking (file-path)
         (multiple-value-list (eval form)))
       (multiple-value-list (eval form))))
 
-(defun eval-forms-from-code (code &optional file-path line character)
-  "Read and evaluate all forms from code string"
-  (declare (ignore line character))
+(defun eval-forms-from-code (code &optional file-path)
   (when file-path
     (setf *current-file* file-path))
-  (if (incomplete-code-p code)
-      (multiple-value-bind (form path)
-          (expand-incomplete-form code (or file-path *current-file*))
-        (unless form
-          (with-input-from-string (s "")
-            (error 'end-of-file :stream s)))
-        (eval-one-form form path))
-      (let ((values nil))
-        (with-input-from-string (stream code)
-          (loop for form = (read stream nil :eof)
-                until (eq form :eof)
-                do (setf values (eval-one-form form file-path))))
-        values)))
+  (let ((values nil))
+    (with-input-from-string (stream code)
+      (loop for form = (read stream nil :eof)
+            until (eq form :eof)
+            do (setf values (eval-one-form form file-path))))
+    values))
 
 (defun capture-backtrace ()
   "Capture current backtrace as string"
   (get-backtrace))
 
-(defun eval-with-output-capture (code &optional file-path line character)
+(defun eval-with-output-capture (code &optional file-path)
   "Evaluate code with output capture, return (values error displays)"
   (let ((output (make-string-output-stream)))
     (handler-case
@@ -496,7 +420,7 @@
               (*trace-output* output)
               #+sbcl (sb-ext:*muffled-warnings* nil))
           (clear-display-outputs)
-          (let ((values (eval-forms-from-code code file-path line character)))
+          (let ((values (eval-forms-from-code code file-path)))
             (update-package-whitelist)
             (list values (get-output-stream-string output) nil nil
                   (collect-display-outputs))))
@@ -509,10 +433,10 @@
               (format nil "~A" e)
               (capture-backtrace) nil)))))
 
-(defun eval-code (code &optional file-path line character)
+(defun eval-code (code &optional file-path)
   "Evaluate code in the master REPL, return (output values error traceback displays)"
   (destructuring-bind (values output error traceback displays)
-      (eval-with-output-capture code file-path line character)
+      (eval-with-output-capture code file-path)
     (list :output output
           :values values
           :error error
@@ -524,70 +448,26 @@
 (defun build-eval-response (msg-id result)
   "Build response for eval request"
   (let ((response (list :id msg-id
-                       :output (getf result :output)
-                       :values (mapcar #'prin1-to-string
-                                      (remove nil (getf result :values)))
-                       :error (getf result :error)
-                       :traceback (getf result :traceback))))
+                        :output (getf result :output)
+                        :values (mapcar #'prin1-to-string
+                                        (remove nil (getf result :values)))
+                        :error (getf result :error)
+                        :traceback (getf result :traceback))))
     (when (getf result :displays)
       (setf response (append response (list :displays (getf result :displays)))))
     response))
 
-(defun handle-eval-message (msg-id code file-path file-line file-char stream)
+(defun handle-eval-message (msg-id code file-path stream)
   "Handle eval message type"
-  (log-error "Eval request: ~A from ~A:~A:~A"
+  (log-error "Eval request: ~A from ~A"
              (subseq code 0 (min 50 (length code)))
-             (or file-path "interactive")
-             (or file-line 0)
-             (or file-char 0))
-  (let ((result (eval-code code file-path file-line file-char)))
+             (or file-path "interactive"))
+  (let ((result (eval-code code file-path)))
     (write-message stream (build-eval-response msg-id result))))
 
 (defun handle-ping-message (msg-id stream)
   "Handle ping message type"
   (write-message stream (list :id msg-id :pong t)))
-
-(defun filter-by-exact-package (prefix-upper all-symbols)
-  "Filter symbols by exact package match"
-  (let ((exact-pkg (find-package prefix-upper)))
-    (when exact-pkg
-      (remove-if-not
-       (lambda (sym)
-         (string= (getf sym :package) (package-name exact-pkg)))
-       all-symbols))))
-
-(defun filter-by-partial-package (prefix-upper all-symbols)
-  "Filter symbols by partial package name match"
-  (remove-if-not
-   (lambda (sym)
-     (let ((pkg-name (getf sym :package)))
-       (and (>= (length pkg-name) (length prefix-upper))
-            (string= prefix-upper pkg-name :end2 (length prefix-upper)))))
-   all-symbols))
-
-(defun filter-by-symbol-name (prefix-upper all-symbols)
-  "Filter symbols by symbol name prefix"
-  (let ((search-prefix (if (and (> (length prefix-upper) 0)
-                               (char= (char prefix-upper 0) #\:))
-                          (subseq prefix-upper 1)
-                          prefix-upper)))
-    (remove-if-not
-     (lambda (sym)
-       (let ((sym-name (getf sym :symbol)))
-         (and (>= (length sym-name) (length search-prefix))
-              (string= search-prefix sym-name :end2 (length search-prefix)))))
-     all-symbols)))
-
-(defun filter-symbols-by-prefix (prefix all-symbols)
-  "Filter symbols by prefix (package name or symbol name)"
-  (let* ((prefix-upper (string-upcase prefix))
-         (exact-match (filter-by-exact-package prefix-upper all-symbols)))
-    (if exact-match
-        exact-match
-        (let ((partial-match (filter-by-partial-package prefix-upper all-symbols)))
-          (if (not (null partial-match))
-              partial-match
-              (filter-by-symbol-name prefix-upper all-symbols))))))
 
 (defun symbol-sort-tier (pkg-name)
   "Get sort tier for package (0=KEYWORD, 1=COMMON-LISP, 2=other)"
@@ -605,13 +485,9 @@
                 (string< (getf a :symbol) (getf b :symbol))
                 (< tier-a tier-b))))))
 
-(defun handle-list-symbols-message (msg-id prefix stream)
-  "Handle list-symbols message type"
-  (let* ((all-symbols (collect-user-symbols))
-         (symbols (if prefix
-                     (filter-symbols-by-prefix prefix all-symbols)
-                     all-symbols)))
-    (setf symbols (sort-symbols-by-priority symbols))
+(defun handle-list-symbols-message (msg-id prefix package-name stream)
+  (let ((symbols (sort-symbols-by-priority
+                  (collect-matching-symbols prefix package-name))))
     (write-message stream (list :id msg-id :symbols symbols))))
 
 (defun handle-symbol-info-message (msg-id symbol-name package-name stream)
@@ -621,13 +497,11 @@
         (write-message stream (append (list :id msg-id) info))
         (write-message stream (list :id msg-id :error "Symbol not found")))))
 
-
 (defun handle-set-current-file (msg-id path contents stream)
   (declare (ignore contents))
   (when path
     (setf *current-file* path)
-    (pushnew path *known-files* :test #'equal)
-    (log-error "Current file: ~A (~D known)" path (length *known-files*)))
+    (log-error "Current file: ~A" path))
   (write-message stream (list :id msg-id :ok t)))
 
 (defun dispatch-message (msg-type msg-id message stream)
@@ -635,35 +509,39 @@
   (cond
     ((string= msg-type "eval")
      (handle-eval-message msg-id
-                         (getf message :code)
-                         (getf message :file-path)
-                         (getf message :file-line)
-                         (getf message :file-character)
-                         stream))
+                          (getf message :code)
+                          (getf message :file-path)
+                          stream))
     ((string= msg-type "ping")
      (handle-ping-message msg-id stream))
     ((string= msg-type "set-current-file")
      (handle-set-current-file msg-id (getf message :path)
                               (getf message :contents) stream))
     ((string= msg-type "list-symbols")
-     (handle-list-symbols-message msg-id (getf message :prefix) stream))
+     (handle-list-symbols-message msg-id (getf message :prefix)
+                                  (getf message :package) stream))
     ((string= msg-type "symbol-info")
      (handle-symbol-info-message msg-id (getf message :symbol)
-                                (getf message :package) stream))
+                                 (getf message :package) stream))
     (t (log-error "Unknown message type: ~A" msg-type))))
 
 (defun handle-request (stream message)
-  "Handle a single request and send response via stream"
-  (log-error "Received message: ~S" message)
+  (log-error "~A id=~A" (getf message :type) (getf message :id))
   (dispatch-message (getf message :type)
-                   (getf message :id)
-                   message
-                   stream))
+                    (getf message :id)
+                    message
+                    stream))
 
 ;;;; Socket Server Integration
 
 (defun message-handler (message stream)
-  "Handle incoming message from socket server"
+  #+sbcl
+  (sb-thread:with-mutex (*request-lock*)
+    (handle-request stream message))
+  #+ecl
+  (mp:with-lock (*request-lock*)
+    (handle-request stream message))
+  #-(or sbcl ecl)
   (handle-request stream message))
 
 (defun start-master-repl ()

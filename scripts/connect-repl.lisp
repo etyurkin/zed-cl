@@ -13,9 +13,9 @@
 
 (let ((here (make-pathname :name nil :type nil
                            :defaults (or *load-truename* *default-pathname-defaults*))))
-  (load (merge-pathnames "../src/zed-cl-repl-impl/config.lisp" here)))
-
-(require :sb-bsd-sockets)
+  (load (merge-pathnames "../src/zed-cl-repl-impl/config.lisp" here))
+  (require :sb-bsd-sockets)
+  (load (merge-pathnames "../src/zed-cl-repl-impl/socket-server.lisp" here)))
 
 (defpackage :repl-client
   (:use :cl))
@@ -51,7 +51,7 @@
                                  *socket*
                                  :input t
                                  :output t
-                                 :element-type 'character))
+                                 :element-type '(unsigned-byte 8)))
           (format t "~&; Common Lisp REPL (~A)~%" lisp-impl)
           (format t "; Connected to ~A:~A~%" (car conn) (cdr conn))
           (format t "; Press Ctrl+D to exit~%~%")
@@ -62,41 +62,43 @@
 
 (defun send-eval-request (code)
   (let ((id (format nil "repl-~D" (incf *request-counter*))))
-    (format *socket-stream* "~S~%"
-            `(:type "eval" :id ,id :code ,code :package nil))
-    (force-output *socket-stream*)
-    (read *socket-stream*)))
+    (zed-cl.socket-server:write-frame *socket-stream*
+                                      `(:type "eval" :id ,id :code ,code :package nil))
+    (let ((response (zed-cl.socket-server:read-frame *socket-stream*)))
+      (when (eq response :eof)
+        (error 'end-of-file :stream *socket-stream*))
+      response)))
 
 (defun repl-loop ()
   (loop
-    (format t "~&CL> ")
-    (force-output)
-    (let ((input (read-line *standard-input* nil :eof)))
-      (when (eq input :eof)
-        (format t "~%")
-        (return))
-      (let ((trimmed-input (string-trim '(#\Space #\Tab #\Newline) input)))
-        (unless (string= trimmed-input "")
-          (when (or (string= trimmed-input "(quit)")
-                    (string= trimmed-input "(exit)")
-                    (string= trimmed-input ":q"))
-            (format t "~%")
-            (return))
-          (handler-case
-              (let ((response (send-eval-request trimmed-input)))
-                (let ((output (getf response :output)))
-                  (when (and output (not (string= output "")))
-                    (format t "~A" output)))
-                (let ((err (getf response :error)))
-                  (if err
-                      (format t "~&ERROR: ~A~%" err)
-                      (dolist (value (getf response :values))
-                        (format t "~&~A~%" value)))))
-            (end-of-file ()
-              (format t "~&Connection lost to master REPL~%")
-              (return))
-            (error (e)
-              (format t "~&Error: ~A~%" e))))))))
+   (format t "~&CL> ")
+   (force-output)
+   (let ((input (read-line *standard-input* nil :eof)))
+     (when (eq input :eof)
+       (format t "~%")
+       (return))
+     (let ((trimmed-input (string-trim '(#\Space #\Tab #\Newline) input)))
+       (unless (string= trimmed-input "")
+         (when (or (string= trimmed-input "(quit)")
+                   (string= trimmed-input "(exit)")
+                   (string= trimmed-input ":q"))
+           (format t "~%")
+           (return))
+         (handler-case
+             (let ((response (send-eval-request trimmed-input)))
+               (let ((output (getf response :output)))
+                 (when (and output (not (string= output "")))
+                   (format t "~A" output)))
+               (let ((err (getf response :error)))
+                 (if err
+                     (format t "~&ERROR: ~A~%" err)
+                     (dolist (value (getf response :values))
+                       (format t "~&~A~%" value)))))
+           (end-of-file ()
+             (format t "~&Connection lost to master REPL~%")
+             (return))
+           (error (e)
+             (format t "~&Error: ~A~%" e))))))))
 
 (defun main ()
   (when (connect-to-master-repl)

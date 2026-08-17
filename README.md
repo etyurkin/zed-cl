@@ -82,6 +82,8 @@ make build
 
 Then in Zed: `zed: install dev extension` → this directory (the one with `extension.toml` and `extension.wasm`). `make` writes native tools to `~/.zed-cl/bin` and copies `extension.wasm` here.
 
+After Lisp or native LSP changes, run `make bundle` so Zed's work-dir binaries are not stale. If Zed recompiles the linked extension (for example after editing `extension.toml`), it **stops** `zed-cl` and does not start it again. Reopen the `.lisp` buffer, or command palette → **language server: restart**.
+
 On Windows without Make, build the four native crates with `cargo build --release --manifest-path src/zed-cl-lsp/Cargo.toml` (and kernel/index/repl), copy `*.exe` into `bin\` and `%USERPROFILE%\.zed-cl\bin`, build the WASM crate with `cargo build --release --target wasm32-wasip2 --manifest-path src/zed-cl-extension/Cargo.toml`, copy `zed_commonlisp.wasm` to `extension.wasm`, then install this directory as above.
 
 ## Configuration
@@ -159,15 +161,27 @@ Open any `.lisp` file and get:
 - Goto-definition
 - Package-aware completions
 
+If the status bar says the language server is not running after you rebuild the extension, reopen the `.lisp` buffer or run **language server: restart**.
+
 ### Interactive REPL
 
 **Inline evaluation:**
 1. Open a `.lisp` file
-2. Put the cursor on a form, or select a complete form
+2. Select the form (or put the cursor on a one-line form)
 3. Press `Ctrl+Shift+Enter` (`repl: run`)
 4. See results inline
 
-Zed sends the current line (or the selection). If that line is an incomplete `defun`, the REPL reads **one** top-level form from the file.
+Zed sends the **current line** or the **selection**. It does not send file path or line number, so the kernel cannot guess the enclosing form. For a multi-line `defun` or `progn`, expand the selection first (`editor: select larger syntax node`, default Alt+Up) and then run, or wrap a region in a `; %%` cell:
+
+```lisp
+; %%
+(progn
+  (format t "hello~%")
+  (+ 1 2 3))
+; %%
+```
+
+With `; %%` markers, `repl: run` sends the whole cell, same as Python `# %%`.
 
 **Example files** (shared REPL — eval definitions, then call them from another buffer):
 - `examples/common-lisp-examples.lisp` — functions in `CL-USER`
