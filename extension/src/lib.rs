@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const GITHUB_REPO: &str = "etyurkin/zed-cl";
+const LANGUAGE_SERVER_ID: &str = "common-lisp";
 const WORKTREE_ENV_KEYS: &[&str] = &[
     "PATH",
     "HOME",
@@ -13,14 +14,14 @@ const WORKTREE_ENV_KEYS: &[&str] = &[
     "HOMEPATH",
 ];
 
-const ZED_CL_ASD: &str = include_str!("../../zed-cl-repl-impl/zed-cl.asd");
-const START_MASTER_REPL: &str = include_str!("../../zed-cl-repl-impl/start-master-repl.lisp");
-const BOOTSTRAP: &str = include_str!("../../zed-cl-repl-impl/bootstrap.lisp");
-const COMPAT: &str = include_str!("../../zed-cl-repl-impl/compat.lisp");
-const CONFIG: &str = include_str!("../../zed-cl-repl-impl/config.lisp");
-const DISPLAY: &str = include_str!("../../zed-cl-repl-impl/display.lisp");
-const SOCKET_SERVER: &str = include_str!("../../zed-cl-repl-impl/socket-server.lisp");
-const MASTER_REPL: &str = include_str!("../../zed-cl-repl-impl/master-repl.lisp");
+const ZED_CL_ASD: &str = include_str!("../../src/zed-cl-repl-impl/zed-cl.asd");
+const START_MASTER_REPL: &str = include_str!("../../src/zed-cl-repl-impl/start-master-repl.lisp");
+const BOOTSTRAP: &str = include_str!("../../src/zed-cl-repl-impl/bootstrap.lisp");
+const COMPAT: &str = include_str!("../../src/zed-cl-repl-impl/compat.lisp");
+const CONFIG: &str = include_str!("../../src/zed-cl-repl-impl/config.lisp");
+const DISPLAY: &str = include_str!("../../src/zed-cl-repl-impl/display.lisp");
+const SOCKET_SERVER: &str = include_str!("../../src/zed-cl-repl-impl/socket-server.lisp");
+const MASTER_REPL: &str = include_str!("../../src/zed-cl-repl-impl/master-repl.lisp");
 
 struct CommonLispExtension {
     cached_lsp_path: Option<String>,
@@ -368,7 +369,7 @@ impl zed::Extension for CommonLispExtension {
         language_server_id: &zed::LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<zed::Command, String> {
-        if language_server_id.as_ref() != "zed-cl" {
+        if language_server_id.as_ref() != LANGUAGE_SERVER_ID {
             return Err(format!("Unknown language server: {}", language_server_id));
         }
 
@@ -387,7 +388,7 @@ impl zed::Extension for CommonLispExtension {
             );
         }
 
-        let settings = LspSettings::for_worktree("zed-cl", worktree)
+        let settings = LspSettings::for_worktree(LANGUAGE_SERVER_ID, worktree)
             .ok()
             .and_then(|s| s.settings);
 

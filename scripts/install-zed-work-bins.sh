@@ -9,6 +9,6 @@ copy_into() {
         cp "$bin/"* "$dir/bin/"
     fi
 }
-copy_into "$HOME/Library/Application Support/Zed/extensions/work/zed-cl"
-copy_into "$HOME/.local/share/zed/extensions/work/zed-cl"
-copy_into "${APPDATA:-}/Zed/extensions/work/zed-cl"
+copy_into "$HOME/Library/Application Support/Zed/extensions/work/common-lisp"
+copy_into "$HOME/.local/share/zed/extensions/work/common-lisp"
+copy_into "${APPDATA:-}/Zed/extensions/work/common-lisp"

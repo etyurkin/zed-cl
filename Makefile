@@ -31,7 +31,7 @@ REPL_TUI_BUILD_DIR := $(REPL_TUI_DIR)/target/release
 # Extension binary directory
 EXTENSION_BIN_DIR := bin
 
-EXTENSION_DIR := src/zed-cl-extension
+EXTENSION_DIR := extension
 WASM_OUT := $(EXTENSION_DIR)/target/wasm32-wasip2/release/zed_commonlisp.wasm
 
 # Colors
@@ -169,14 +169,14 @@ build: ensure-toolchain setup-grammar setup-quicklisp verify-lisp build-system-i
 	@echo "  LSP:       $(LSP_BUILD_DIR)/$(LSP_BIN)"
 	@echo "  Kernel:    $(KERNEL_BUILD_DIR)/$(KERNEL_BIN)"
 	@echo "  TUI REPL:  $(REPL_TUI_BUILD_DIR)/$(REPL_TUI_BIN)"
-	@echo "  Extension: extension.wasm"
+	@echo "  Extension: $(EXTENSION_DIR)/extension.wasm"
 	@echo ""
 	@echo "Extension bundles:"
 	@echo "  LSP:       $(EXTENSION_BIN_DIR)/$(LSP_BIN)"
 	@echo "  Kernel:    $(EXTENSION_BIN_DIR)/$(KERNEL_BIN)"
 	@echo "  TUI REPL:  $(EXTENSION_BIN_DIR)/$(REPL_TUI_BIN)"
 	@echo ""
-	@du -h $(LSP_BUILD_DIR)/$(LSP_BIN) $(KERNEL_BUILD_DIR)/$(KERNEL_BIN) $(REPL_TUI_BUILD_DIR)/$(REPL_TUI_BIN) extension.wasm | awk '{print "  " $$2 ": " $$1}'
+	@du -h $(LSP_BUILD_DIR)/$(LSP_BIN) $(KERNEL_BUILD_DIR)/$(KERNEL_BIN) $(REPL_TUI_BUILD_DIR)/$(REPL_TUI_BIN) $(EXTENSION_DIR)/extension.wasm | awk '{print "  " $$2 ": " $$1}'
 
 build-lsp:
 	@echo "$(BLUE)Building LSP server...$(NC)"
@@ -198,7 +198,7 @@ build-extension: ensure-toolchain
 	@bin=$$(dirname $$(rustup which rustc --toolchain stable)); \
 	PATH="$$bin:$$PATH" RUSTC="$$bin/rustc" \
 	"$$bin/cargo" build --release --target wasm32-wasip2 --manifest-path=$(EXTENSION_DIR)/Cargo.toml
-	@cp $(WASM_OUT) extension.wasm
+	@cp $(WASM_OUT) $(EXTENSION_DIR)/extension.wasm
 	@echo "$(GREEN)✓ Extension WASM built$(NC)"
 
 check: setup-quicklisp verify-lisp
@@ -254,7 +254,8 @@ clean:
 	@rm -rf $(EXTENSION_BIN_DIR)
 	@rm -rf target/
 	@rm -rf grammars/
-	@rm -f extension.wasm
+	@rm -f $(EXTENSION_DIR)/extension.wasm
+	@rm -rf $(EXTENSION_DIR)/grammars/
 	@# Unregister kernel
 	@if [ -d ~/.local/share/jupyter/kernels/commonlisp-zed ]; then \
 		rm -rf ~/.local/share/jupyter/kernels/commonlisp-zed; \
@@ -269,8 +270,8 @@ clean:
 install-dev: build
 	@echo "$(GREEN)✓ Extension ready for Zed.$(NC)"
 	@echo ""
-	@echo "In Zed: command palette → zed: install dev extension → this directory"
-	@echo "Zed loads extension.wasm from make; it does not compile the WASM crate."
+	@echo "In Zed: command palette → zed: install dev extension → the extension/ directory"
+	@echo "Zed loads extension/extension.wasm from make; it does not compile the WASM crate."
 
 # Register kernel for Zed (required for REPL to work)
 register-kernel: bundle
@@ -298,8 +299,8 @@ verify:
 	@which jupyter > /dev/null && echo "$(GREEN)  ✓ Jupyter found: $$(jupyter --version 2>&1 | head -1)$(NC)" || echo "$(YELLOW)  ℹ Jupyter not installed (optional)$(NC)"
 	@echo ""
 	@echo "Extension status:"
-	@if [ -f extension.wasm ]; then \
-		echo "$(GREEN)  ✓ extension.wasm built ($$(du -h extension.wasm | awk '{print $$1}'))$(NC)"; \
+	@if [ -f $(EXTENSION_DIR)/extension.wasm ]; then \
+		echo "$(GREEN)  ✓ extension.wasm built ($$(du -h $(EXTENSION_DIR)/extension.wasm | awk '{print $$1}'))$(NC)"; \
 	else \
 		echo "$(YELLOW)  ✗ extension.wasm not found (run 'make build')$(NC)"; \
 	fi
