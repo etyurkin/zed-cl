@@ -12,5 +12,3 @@ completion_query_characters = [":", "-", "*", "+", "/"]
 autoclose_before = ")]}\";"
 increase_indent_pattern = "^[^;]*\\([^;]*$"
 decrease_indent_pattern = "^\\s*\\)"
-
-[language_servers.zed-cl]

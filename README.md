@@ -80,11 +80,25 @@ cd zed-cl
 make build
 ```
 
-Then in Zed: `zed: install dev extension` → this directory (the one with `extension.toml` and `extension.wasm`). `make` writes native tools to `~/.zed-cl/bin` and copies `extension.wasm` here.
+Then in Zed: `zed: install dev extension` → the `extension/` directory (the one with `extension.toml` and `extension.wasm`). `make` writes native tools to `~/.zed-cl/bin` and copies `extension.wasm` into `extension/`.
 
 After Lisp or native LSP changes, run `make bundle` so Zed's work-dir binaries are not stale. If Zed recompiles the linked extension (for example after editing `extension.toml`), it **stops** `zed-cl` and does not start it again. Reopen the `.lisp` buffer, or command palette → **language server: restart**.
 
-On Windows without Make, build the four native crates with `cargo build --release --manifest-path src/zed-cl-lsp/Cargo.toml` (and kernel/index/repl), copy `*.exe` into `bin\` and `%USERPROFILE%\.zed-cl\bin`, build the WASM crate with `cargo build --release --target wasm32-wasip2 --manifest-path src/zed-cl-extension/Cargo.toml`, copy `zed_commonlisp.wasm` to `extension.wasm`, then install this directory as above.
+On Windows without Make, build the four native crates with `cargo build --release --manifest-path src/zed-cl-lsp/Cargo.toml` (and kernel/index/repl), copy `*.exe` into `bin\` and `%USERPROFILE%\.zed-cl\bin`, build the WASM crate with `cargo build --release --target wasm32-wasip2 --manifest-path extension/Cargo.toml`, copy `zed_commonlisp.wasm` to `extension\extension.wasm`, then install the `extension\` directory as above.
+
+#### Windows: "Failed to resolve clang path"
+
+`install dev extension` makes Zed compile the Tree-sitter grammar itself, which needs clang from the `wasi-sdk`. Zed downloads it on demand; when that fails you get `Failed to resolve clang path`, and the real cause is only in the log (`zed: open log`, search for `wasi-sdk`). Install the SDK yourself and point Zed at it:
+
+```powershell
+curl.exe -L -o "$env:TEMP\wasi-sdk.tar.gz" `
+  https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sdk-25.0-x86_64-windows.tar.gz
+mkdir "$env:USERPROFILE\wasi-sdk" -Force
+tar -xzf "$env:TEMP\wasi-sdk.tar.gz" -C "$env:USERPROFILE\wasi-sdk" --strip-components=1
+setx WASI_SDK_PATH "$env:USERPROFILE\wasi-sdk"
+```
+
+Zed looks for `%WASI_SDK_PATH%\bin\clang.exe`. Use wasi-sdk **25** — that is the version Zed pins. Fully quit Zed and relaunch it from Explorer so it picks up the new variable. If an earlier attempt left a half-written cache, delete `%LOCALAPPDATA%\Zed\extensions\build\wasi-sdk*` first. Zed's asset list has no ARM64 Windows build, so on ARM64 this manual install is the only route (the x86_64 `clang.exe` runs under emulation).
 
 ## Configuration
 

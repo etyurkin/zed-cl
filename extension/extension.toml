@@ -1,4 +1,4 @@
-id = "zed-cl"
+id = "common-lisp"
 name = "Common Lisp"
 version = "1.0.1"
 schema_version = 1
@@ -10,6 +10,6 @@ repository = "https://github.com/etyurkin/zed-cl"
 repository = "https://github.com/tree-sitter-grammars/tree-sitter-commonlisp"
 rev = "4d2a2247bb0ec117193ef33e3ce546a6781c5bf5"
 
-[language_servers.zed-cl]
+[language_servers.common-lisp]
 name = "zed-cl"
 language = "Common Lisp"
