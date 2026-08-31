@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    # all branches; the filter also keeps v* tags from double-building with release.yml
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 

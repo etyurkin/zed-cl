@@ -132,6 +132,17 @@ impl ReplRequest {
         }
     }
 
+    /// True when re-sending after a transport failure cannot repeat a side effect.
+    pub fn is_idempotent(&self) -> bool {
+        matches!(
+            self,
+            ReplRequest::SymbolInfo { .. }
+                | ReplRequest::ListSymbols { .. }
+                | ReplRequest::SetCurrentFile { .. }
+                | ReplRequest::Ping { .. }
+        )
+    }
+
     pub fn to_sexp(&self) -> String {
         match self {
             ReplRequest::SymbolInfo { id, symbol, package } => {
@@ -549,6 +560,19 @@ mod tests {
         let sexp = request.to_sexp();
         assert!(sexp.contains(":prefix \"MAP\""));
         assert!(sexp.contains(":package \"MY-APP\""));
+    }
+
+    #[test]
+    fn only_side_effect_free_requests_are_idempotent() {
+        assert!(!ReplRequest::Eval {
+            id: "1".into(),
+            code: "(+ 1 2)".into(),
+            package: None,
+            file_path: None,
+        }
+        .is_idempotent());
+        assert!(!ReplRequest::LoadFile { id: "1".into(), path: "a.lisp".into() }.is_idempotent());
+        assert!(ReplRequest::Ping { id: "1".into() }.is_idempotent());
     }
 
     #[test]

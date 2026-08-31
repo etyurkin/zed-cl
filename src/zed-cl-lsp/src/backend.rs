@@ -566,7 +566,7 @@ impl LanguageServer for LispLspBackend {
             },
             server_info: Some(ServerInfo {
                 name: "cl-zed-lsp (Rust)".to_string(),
-                version: Some("0.1.0".to_string()),
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
             }),
         })
     }
@@ -797,16 +797,21 @@ impl LanguageServer for LispLspBackend {
 
         debug!("Completion prefix: {}", prefix);
 
-        // Check if we're inside a list (after an opening paren)
-        let lines: Vec<&str> = text.lines().collect();
-        let inside_paren = if (position.line as usize) < lines.len() {
-            let line = lines[position.line as usize];
-            let before_cursor = &line[..position.character.saturating_sub(prefix.len() as u32) as usize];
-            // Check if there's an opening paren before the prefix
-            before_cursor.trim_end().ends_with('(')
-        } else {
-            false
-        };
+        // Check if we are inside a list (after an opening paren). Walk chars
+        // backwards instead of slicing: LSP columns are UTF-16 units, not bytes.
+        let inside_paren = text
+            .lines()
+            .nth(position.line as usize)
+            .map(|line| {
+                let cursor = crate::symbol_extractor::utf16_col_to_byte(line, position.character);
+                line[..cursor]
+                    .chars()
+                    .rev()
+                    .skip(prefix.chars().count())
+                    .find(|c| !c.is_whitespace())
+                    == Some('(')
+            })
+            .unwrap_or(false);
 
         debug!("Inside paren: {}", inside_paren);
 
@@ -828,7 +833,9 @@ impl LanguageServer for LispLspBackend {
 
             let symbol_start = Position {
                 line: position.line,
-                character: position.character - (prefix.len() - qualifier_end) as u32,
+                character: position
+                    .character
+                    .saturating_sub(prefix[qualifier_end..].encode_utf16().count() as u32),
             };
             tower_lsp::lsp_types::Range {
                 start: symbol_start,
@@ -838,7 +845,9 @@ impl LanguageServer for LispLspBackend {
             // No package qualifier, replace entire prefix
             let prefix_start = Position {
                 line: position.line,
-                character: position.character - prefix.len() as u32,
+                character: position
+                    .character
+                    .saturating_sub(prefix.encode_utf16().count() as u32),
             };
             tower_lsp::lsp_types::Range {
                 start: prefix_start,

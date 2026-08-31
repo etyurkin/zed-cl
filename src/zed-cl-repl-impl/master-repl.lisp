@@ -285,8 +285,7 @@
     (do-all-symbols (s)
       (when (and (string= (symbol-name s) (string-upcase symbol-name))
                  (symbol-package s)
-                 (user-package-p (symbol-package s))
-                 (eq (symbol-package s) (symbol-package s)))
+                 (user-package-p (symbol-package s)))
         (return-from found s)))
     nil))
 
@@ -413,17 +412,24 @@
 
 (defun eval-with-output-capture (code &optional file-path)
   "Evaluate code with output capture, return (values error displays)"
-  (let ((output (make-string-output-stream)))
+  (let ((output (make-string-output-stream))
+        (backtrace nil))
     (handler-case
-        (let ((*standard-output* output)
-              (*error-output* output)
-              (*trace-output* output)
-              #+sbcl (sb-ext:*muffled-warnings* nil))
-          (clear-display-outputs)
-          (let ((values (eval-forms-from-code code file-path)))
-            (update-package-whitelist)
-            (list values (get-output-stream-string output) nil nil
-                  (collect-display-outputs))))
+        ;; HANDLER-CASE unwinds the stack before running a clause, so the
+        ;; backtrace must be captured here, at signal time, while the frames
+        ;; below the error still exist.
+        (handler-bind ((error (lambda (e)
+                                (declare (ignore e))
+                                (setf backtrace (capture-backtrace)))))
+          (let ((*standard-output* output)
+                (*error-output* output)
+                (*trace-output* output)
+                #+sbcl (sb-ext:*muffled-warnings* nil))
+            (clear-display-outputs)
+            (let ((values (eval-forms-from-code code file-path)))
+              (update-package-whitelist)
+              (list values (get-output-stream-string output) nil nil
+                    (collect-display-outputs)))))
       (end-of-file ()
         (list nil (get-output-stream-string output)
               "Incomplete code: unbalanced parentheses"
@@ -431,7 +437,7 @@
       (error (e)
         (list nil (get-output-stream-string output)
               (format nil "~A" e)
-              (capture-backtrace) nil)))))
+              (or backtrace (capture-backtrace)) nil)))))
 
 (defun eval-code (code &optional file-path)
   "Evaluate code in the master REPL, return (output values error traceback displays)"
@@ -449,8 +455,7 @@
   "Build response for eval request"
   (let ((response (list :id msg-id
                         :output (getf result :output)
-                        :values (mapcar #'prin1-to-string
-                                        (remove nil (getf result :values)))
+                        :values (mapcar #'prin1-to-string (getf result :values))
                         :error (getf result :error)
                         :traceback (getf result :traceback))))
     (when (getf result :displays)

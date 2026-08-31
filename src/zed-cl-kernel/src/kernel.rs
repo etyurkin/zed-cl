@@ -75,11 +75,15 @@ impl<S: SocketRecv> Connection<S> {
         parts.pop(); // Remove delimiter
         let identities = parts;
 
+        if jparts.len() < 4 {
+            anyhow::bail!("Malformed message: expected 4 frames after delimiter, got {}", jparts.len());
+        }
+
         // Verify HMAC if key is present
         if let Some(ref key) = self.hmac_key {
             let sig = HEXLOWER.decode(&expected_hmac)?;
             let mut msg = Vec::new();
-            for part in &jparts[..4.min(jparts.len())] {
+            for part in &jparts[..4] {
                 msg.extend_from_slice(part);
             }
             let mut mac = HmacSha256::new_from_slice(key)
@@ -386,7 +390,7 @@ impl LispKernel {
             "status": "ok",
             "protocol_version": "5.3",
             "implementation": "zed-cl-kernel",
-            "implementation_version": "0.1.0",
+            "implementation_version": env!("CARGO_PKG_VERSION"),
             "language_info": {
                 "name": "common-lisp",
                 "version": "ANSI",
@@ -553,8 +557,15 @@ impl LispKernel {
                             shell.send_message(identities, "execute_reply", parent_header, &reply_content).await?;
                         }
                     }
-                    _ => {
-                        error!("Unexpected response type");
+                    common_rust::ResponseData::Error { error } => {
+                        error!("Master REPL error response: {}", error);
+                        self.send_error_reply(shell, iopub, identities, parent_header, execution_count,
+                            "LispError", error, vec![]).await?;
+                    }
+                    other => {
+                        error!("Unexpected response type: {:?}", other);
+                        self.send_error_reply(shell, iopub, identities, parent_header, execution_count,
+                            "ProtocolError", "Unexpected response from master REPL", vec![]).await?;
                     }
                 }
             }

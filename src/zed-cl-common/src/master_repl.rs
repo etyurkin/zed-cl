@@ -7,10 +7,7 @@ use std::io::{self, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{debug, error, info};
 
@@ -193,6 +190,11 @@ impl ReplStream {
             || self.writer.peer_addr().is_err()
             || peer_closed(&self.writer)
     }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) {
+        // reader and writer clone the same socket, so this covers both.
+        let _ = self.writer.set_read_timeout(timeout);
+    }
 }
 
 pub fn write_frame<W: Write>(stream: &mut W, sexp: &str) -> Result<()> {
@@ -224,7 +226,7 @@ pub struct MasterReplClient {
     stream: Option<ReplStream>,
     request_counter: u64,
     extension_dir: Option<PathBuf>,
-    repl_starting: Arc<AtomicBool>,
+    repl_starting: AtomicBool,
     spawn_lock: Option<SpawnLock>,
 }
 
@@ -238,7 +240,7 @@ impl MasterReplClient {
             stream: None,
             request_counter: 0,
             extension_dir,
-            repl_starting: Arc::new(AtomicBool::new(false)),
+            repl_starting: AtomicBool::new(false),
             spawn_lock: None,
         }
     }
@@ -479,27 +481,51 @@ impl MasterReplClient {
         self.ensure_connected()?;
         self.assign_id(&mut request);
         let request_id = request.id().to_string();
+        let idempotent = request.is_idempotent();
         let sexp = request.to_sexp();
         debug!("Sending request: {}", sexp);
 
-        match self.write_and_read(&sexp, &request_id) {
+        match self.write_and_read(&sexp, &request_id, idempotent) {
             Ok(response) => Ok(response),
-            Err(e) => {
+            // Only requests without side effects may be re-sent: an eval that
+            // outlives a transport hiccup must not run twice.
+            Err(e) if idempotent => {
                 debug!("Request failed ({e:#}), reconnecting");
                 self.stream = None;
                 self.ensure_connected()?;
-                self.write_and_read(&sexp, &request_id)
+                self.write_and_read(&sexp, &request_id, idempotent)
                     .with_context(|| format!("Failed after reconnect: {e:#}"))
+            }
+            Err(e) => {
+                // The connection may hold a half-read frame; force a reconnect.
+                self.stream = None;
+                Err(e)
             }
         }
     }
 
-    fn write_and_read(&mut self, sexp: &str, request_id: &str) -> Result<ReplResponse> {
+    fn write_and_read(
+        &mut self,
+        sexp: &str,
+        request_id: &str,
+        idempotent: bool,
+    ) -> Result<ReplResponse> {
         let stream = self.stream.as_mut().context("Not connected")?;
-        stream.write_frame(sexp)?;
-        let response = stream.read_frame()?;
-        debug!("Received response: {}", response.trim());
-        ReplResponse::from_sexp(&response, request_id)
+        // An eval may legitimately run for minutes; requests that cannot be
+        // retried get no read deadline instead of timing out mid-eval.
+        if !idempotent {
+            stream.set_read_timeout(None);
+        }
+        let result = (|| {
+            stream.write_frame(sexp)?;
+            let response = stream.read_frame()?;
+            debug!("Received response: {}", response.trim());
+            ReplResponse::from_sexp(&response, request_id)
+        })();
+        if !idempotent {
+            stream.set_read_timeout(Some(IO_TIMEOUT));
+        }
+        result
     }
 
     fn assign_id(&mut self, request: &mut ReplRequest) {

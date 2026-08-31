@@ -50,6 +50,45 @@ impl CommonLispExtension {
         None
     }
 
+    /// A binary left by a previous auto-download in zed-cl-<version>/, so a
+    /// restart works without reaching GitHub.
+    fn versioned_binary(name: &str) -> Option<String> {
+        let file = Self::binary_name(name);
+        let mut candidates: Vec<PathBuf> = fs::read_dir(".")
+            .ok()?
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with("zed-cl-"))
+            })
+            .map(|entry| entry.path().join(&file))
+            .filter(|path| path.is_file())
+            .collect();
+        candidates.sort();
+        candidates
+            .pop()
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    /// Path under ~/.zed-cl/bin, returned unchecked: the WASI sandbox cannot
+    /// stat host paths, but Zed spawns the command on the host where it
+    /// resolves. Do not add an is_file() guard here - it always fails in the
+    /// sandbox and silently disables this fallback.
+    fn home_binary(worktree: &zed::Worktree, name: &str) -> Option<String> {
+        let home = Self::env_value(worktree, "HOME")
+            .or_else(|| Self::env_value(worktree, "USERPROFILE"))?;
+        Some(
+            PathBuf::from(home)
+                .join(".zed-cl")
+                .join("bin")
+                .join(Self::binary_name(name))
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
     fn asset_name() -> String {
         let (os, arch) = zed::current_platform();
         let os = match os {
@@ -138,11 +177,18 @@ impl CommonLispExtension {
                 return Ok(path.clone());
             }
         }
+        if let Some(path) = Self::versioned_binary("zed-cl-lsp") {
+            self.cached_lsp_path = Some(path.clone());
+            return Ok(path);
+        }
         if !self.github_unavailable {
             match self.download_binaries(language_server_id) {
                 Ok(path) => return Ok(path),
                 Err(_) => self.github_unavailable = true,
             }
+        }
+        if let Some(path) = Self::home_binary(worktree, "zed-cl-lsp") {
+            return Ok(path);
         }
         Err(
             "zed-cl-lsp not found on PATH or in the extension work directory, and it could not be downloaded from GitHub."

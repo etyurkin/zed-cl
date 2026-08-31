@@ -36,10 +36,13 @@ pub fn kernels_dir() -> Option<PathBuf> {
     } else if cfg!(windows) {
         PathBuf::from(std::env::var_os("APPDATA")?).join("jupyter")
     } else {
-        std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| crate::home_dir().unwrap_or_default().join(".local/share"))
-            .join("jupyter")
+        match std::env::var_os("XDG_DATA_HOME") {
+            Some(dir) => PathBuf::from(dir),
+            // No HOME means no usable data dir; a relative fallback would
+            // plant .local/share inside the current project.
+            None => crate::home_dir()?.join(".local/share"),
+        }
+        .join("jupyter")
     };
     Some(base.join("kernels").join(KERNEL_NAME))
 }

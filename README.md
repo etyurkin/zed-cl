@@ -41,7 +41,7 @@ If eval does not appear in a `.lisp` buffer, run `repl: refresh kernelspecs`.
 
 ### Installing the native tools yourself
 
-Only needed if the automatic download is blocked (offline, proxy, firewall). Put the binaries anywhere on PATH:
+Only needed if the automatic download is blocked (offline, proxy, firewall). Put the binaries in `~/.zed-cl/bin` — the extension looks there automatically — or anywhere on PATH:
 
 | Machine | Native zip |
 |---|---|
@@ -54,7 +54,6 @@ Only needed if the automatic download is blocked (offline, proxy, firewall). Put
 mkdir -p ~/.zed-cl/bin
 unzip zed-cl-macos-aarch64.zip -d ~/.zed-cl/bin
 chmod +x ~/.zed-cl/bin/*
-# then add ~/.zed-cl/bin to PATH
 ```
 
 Windows (PowerShell):
@@ -62,10 +61,16 @@ Windows (PowerShell):
 ```powershell
 New-Item -ItemType Directory -Force "$env:USERPROFILE\.zed-cl\bin" | Out-Null
 Expand-Archive -Force zed-cl-windows-x86_64.zip "$env:USERPROFILE\.zed-cl\bin"
-setx PATH "$env:PATH;$env:USERPROFILE\.zed-cl\bin"
 ```
 
-Fully quit and reopen Zed afterwards so it picks up the new PATH.
+Optionally add the directory to your user PATH (never `setx PATH "$env:PATH;..."` — that copies the machine PATH into the user PATH and truncates at 1024 characters):
+
+```powershell
+$userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+[Environment]::SetEnvironmentVariable('PATH', "$userPath;$env:USERPROFILE\.zed-cl\bin", 'User')
+```
+
+Fully quit and reopen Zed afterwards so it picks up the new binaries.
 
 ## Building from source
 

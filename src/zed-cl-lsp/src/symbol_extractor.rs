@@ -6,6 +6,32 @@ use tower_lsp::lsp_types::Position;
 use tree_sitter::{Node, Parser, Point};
 use tree_sitter_commonlisp::LANGUAGE_COMMONLISP;
 
+/// Convert an LSP UTF-16 column to a byte offset within `line`, clamped to
+/// char boundaries so slicing can never panic on non-ASCII text.
+pub fn utf16_col_to_byte(line: &str, utf16_col: u32) -> usize {
+    let mut units = 0u32;
+    for (i, ch) in line.char_indices() {
+        if units >= utf16_col {
+            return i;
+        }
+        units += ch.len_utf16() as u32;
+    }
+    line.len()
+}
+
+/// Convert an LSP position (UTF-16 columns) to a tree-sitter point (byte columns).
+fn position_to_point(source: &str, position: Position) -> Point {
+    let column = source
+        .lines()
+        .nth(position.line as usize)
+        .map(|line| utf16_col_to_byte(line, position.character))
+        .unwrap_or(0);
+    Point {
+        row: position.line as usize,
+        column,
+    }
+}
+
 pub struct TreeSitterExtractor {
     parser: Parser,
 }
@@ -28,11 +54,7 @@ impl TreeSitterExtractor {
         let tree = self.parse(source)?;
         let root = tree.root_node();
 
-        // Convert LSP position to tree-sitter point
-        let point = Point {
-            row: position.line as usize,
-            column: position.character as usize,
-        };
+        let point = position_to_point(source, position);
 
         // Find the smallest node at this position
         let node = root.descendant_for_point_range(point, point)?;
@@ -43,10 +65,7 @@ impl TreeSitterExtractor {
 
     pub fn enclosing_form(&mut self, source: &str, position: Position) -> Option<String> {
         let tree = self.parse(source)?;
-        let point = Point {
-            row: position.line as usize,
-            column: position.character as usize,
-        };
+        let point = position_to_point(source, position);
         let mut node = tree.root_node().descendant_for_point_range(point, point)?;
         loop {
             if node.kind() == "list_lit" {
@@ -89,10 +108,7 @@ impl TreeSitterExtractor {
         let tree = self.parse(source)?;
         let root = tree.root_node();
 
-        let point = Point {
-            row: position.line as usize,
-            column: position.character as usize,
-        };
+        let point = position_to_point(source, position);
 
         // Find the node at the cursor position
         let node = root.descendant_for_point_range(point, point)?;
@@ -120,11 +136,7 @@ impl TreeSitterExtractor {
         }
 
         let line = lines[position.line as usize];
-        let col = position.character as usize;
-
-        if col > line.len() {
-            return None;
-        }
+        let col = utf16_col_to_byte(line, position.character);
 
         // Extract word before cursor
         // Look backwards from cursor to find start of word
@@ -164,10 +176,7 @@ impl TreeSitterExtractor {
         let tree = self.parse(source)?;
         let root = tree.root_node();
 
-        let point = Point {
-            row: position.line as usize,
-            column: position.character as usize,
-        };
+        let point = position_to_point(source, position);
 
         let mut node = root.descendant_for_point_range(point, point)?;
         let initial_kind = node.kind().to_string();
@@ -429,6 +438,25 @@ mod tests {
         assert_eq!(defs[0].0, "FOO");
         assert_eq!(defs[1].0, "*BAR*");
         assert_eq!(defs[2].0, "BAZ");
+    }
+
+    #[test]
+    fn utf16_columns_map_to_char_boundaries() {
+        assert_eq!(utf16_col_to_byte("ab", 1), 1);
+        // Two 2-byte chars before the target: UTF-16 unit 3 is byte 5.
+        assert_eq!(utf16_col_to_byte("\u{e9}\u{e9}(f", 3), 5);
+        // Non-BMP char: 2 UTF-16 units, 4 bytes.
+        assert_eq!(utf16_col_to_byte("\u{1f600}x", 2), 4);
+        assert_eq!(utf16_col_to_byte("ab", 99), 2);
+    }
+
+    #[test]
+    fn prefix_at_position_handles_non_ascii_lines() {
+        let mut extractor = TreeSitterExtractor::new().unwrap();
+        // The old byte-offset math sliced mid-char here and panicked.
+        let source = "(\u{e9}\u{e9}fo)";
+        let prefix = extractor.prefix_at_position(source, Position { line: 0, character: 4 });
+        assert_eq!(prefix, Some("\u{c9}\u{c9}F".to_string()));
     }
 
     #[test]
