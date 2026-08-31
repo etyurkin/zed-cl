@@ -438,10 +438,11 @@ impl LispKernel {
             state.count
         };
 
-        // Send busy status
+        // Send busy status. iopub is a PUB socket: leading frames are topics,
+        // not routing ids, so router identities do not belong on it.
         if !silent {
-            self.send_status(iopub, parent_header, "busy", identities).await?;
-            self.send_execute_input(iopub, parent_header, code, execution_count, identities).await?;
+            self.send_status(iopub, parent_header, "busy", &[]).await?;
+            self.send_execute_input(iopub, parent_header, code, execution_count, &[]).await?;
         }
 
         // Forward to master REPL
@@ -457,6 +458,11 @@ impl LispKernel {
             tokio::task::spawn_blocking(move || client.blocking_write().send_request(request))
                 .await?
         };
+        info!(
+            "Master REPL answered execute {}: {}",
+            execution_count,
+            if result.is_ok() { "ok" } else { "error" }
+        );
 
         // Send result back
         match result {
@@ -469,7 +475,7 @@ impl LispKernel {
                             error!("Lisp evaluation error: {}", err);
 
                             if !silent && !output.is_empty() {
-                                self.send_stream(iopub, parent_header, "stdout", &output, identities).await?;
+                                self.send_stream(iopub, parent_header, "stdout", &output, &[]).await?;
                             }
 
                             let traceback_lines: Vec<String> = if let Some(tb) = traceback {
@@ -489,7 +495,7 @@ impl LispKernel {
                             // Successful execution
                             if !silent {
                                 if !output.is_empty() {
-                                    self.send_stream(iopub, parent_header, "stdout", &output, identities).await?;
+                                    self.send_stream(iopub, parent_header, "stdout", &output, &[]).await?;
                                 }
 
                                 if !values.is_empty() || displays.is_some() {
@@ -550,7 +556,8 @@ impl LispKernel {
                                             "metadata": {}
                                         });
 
-                                        iopub.send_message(identities, "execute_result", parent_header, &execute_result_content).await?;
+                                        iopub.send_message(&[], "execute_result", parent_header, &execute_result_content).await?;
+                                        info!("Sent execute_result for {}", execution_count);
                                     }
                                 }
                             }
@@ -561,6 +568,7 @@ impl LispKernel {
                             });
 
                             shell.send_message(identities, "execute_reply", parent_header, &reply_content).await?;
+                            info!("Sent execute_reply for {}", execution_count);
                         }
                     }
                     common_rust::ResponseData::Error { error } => {
@@ -583,7 +591,8 @@ impl LispKernel {
         }
 
         if !silent {
-            self.send_status(iopub, parent_header, "idle", identities).await?;
+            self.send_status(iopub, parent_header, "idle", &[]).await?;
+            info!("Execute {} complete (idle sent)", execution_count);
         }
 
         Ok(())
@@ -730,7 +739,7 @@ impl LispKernel {
             "traceback": traceback
         });
 
-        iopub.send_message(identities, "error", parent_header, &error_content).await?;
+        iopub.send_message(&[], "error", parent_header, &error_content).await?;
 
         let reply_content = json!({
             "status": "error",
