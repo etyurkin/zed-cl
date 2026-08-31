@@ -13,6 +13,7 @@
   (:export #:start-socket-server
            #:write-frame
            #:read-frame
+           #:client-interrupt
            #:*running*))
 
 (in-package :zed-cl.socket-server)
@@ -23,6 +24,40 @@
 (defparameter *bind-host* "127.0.0.1")
 
 (defconstant +max-frame-octets+ (* 32 1024 1024))
+
+(defvar *auth-token* nil
+  "Shared secret every client must present before any other request.")
+
+(define-condition client-interrupt (error) ()
+  (:report "Evaluation interrupted")
+  (:documentation "Signaled inside an evaluating thread to abort the eval."))
+
+(defun getenv* (name)
+  #+sbcl (sb-ext:posix-getenv name)
+  #+ecl (ext:getenv name)
+  #-(or sbcl ecl) (progn name nil))
+
+(defun generate-auth-token ()
+  "Prefer the token handed in by the spawning client (OS entropy); fall back
+to the implementation RNG mixed with the clock."
+  (or (getenv* "ZED_CL_AUTH_TOKEN")
+      (let ((state (make-random-state t)))
+        (string-downcase
+         (format nil "~36,13,'0R~36,13,'0R~36,13,'0R"
+                 (random (expt 36 13) state)
+                 (random (expt 36 13) state)
+                 (logxor (get-internal-real-time) (get-universal-time)))))))
+
+(defun token-equal (a b)
+  "Constant-time string comparison for the auth token."
+  (and (stringp a)
+       (stringp b)
+       (= (length a) (length b))
+       (zerop (reduce #'logior
+                      (map 'list
+                           (lambda (x y) (logxor (char-code x) (char-code y)))
+                           a b)
+                      :initial-value 0))))
 
 (defun log-message (format-string &rest args)
   "Log a message to stderr"
@@ -133,21 +168,49 @@
            (unless (= got len)
              (return-from read-frame :eof)))
          (handler-case
-             (read-from-string (utf8-to-string octets))
+             ;; Never evaluate #. from the wire.
+             (let ((*read-eval* nil))
+               (read-from-string (utf8-to-string octets)))
            (error (e)
              (log-message "Error reading message: ~A" e)
              :eof)))))))
+
+(defun authenticate-client (stream)
+  "First frame must be (:type \"auth\" :token <secret>). Anything else is
+rejected: the server evaluates arbitrary code, and localhost is reachable by
+every local user."
+  (let ((message (read-frame stream)))
+    (cond
+      ((eq message :eof) nil)
+      ((and (listp message)
+            (equal (getf message :type) "auth")
+            (token-equal (getf message :token) *auth-token*))
+       (write-frame stream (list :id (or (getf message :id) "handshake") :ok t))
+       t)
+      (t
+       (log-message "Rejected unauthenticated client")
+       (ignore-errors
+         (write-frame stream
+                      (list :id (or (and (listp message) (getf message :id)) "handshake")
+                            :error "Authentication failed. Restart the master REPL and Zed.")))
+       nil))))
 
 (defun handle-client (client-socket message-handler)
   (let ((stream (make-client-stream client-socket)))
     (log-message "Client connected")
     (unwind-protect
-         (loop while *running* do
-           (let ((message (read-frame stream)))
-             (when (eq message :eof)
-               (log-message "Client disconnected")
-               (return))
-             (funcall message-handler message stream)))
+         (when (authenticate-client stream)
+           (loop while *running* do
+             (handler-case
+                 (let ((message (read-frame stream)))
+                   (when (eq message :eof)
+                     (log-message "Client disconnected")
+                     (return))
+                   (funcall message-handler message stream))
+               ;; An interrupt that lands after the eval already finished hits
+               ;; this thread outside eval; drop it instead of dying.
+               (client-interrupt ()
+                 (log-message "Late interrupt ignored")))))
       (ignore-errors (close stream))
       (ignore-errors (sb-bsd-sockets:socket-close client-socket)))))
 
@@ -179,9 +242,10 @@
   "Start a TCP server on 127.0.0.1 with an ephemeral port.
    Writes ~/.zed-cl/repl-{impl}.json so clients can connect."
   (cleanup-stale-server)
+  (setf *auth-token* (generate-auth-token))
   (let ((server-socket (create-server-socket)))
     (let ((port (local-port server-socket)))
-      (write-connection-file *bind-host* port)
+      (write-connection-file *bind-host* port *auth-token*)
       (log-message "========================================")
       (log-message "Master REPL TCP Server")
       (log-message "Listening on ~A:~A" *bind-host* port)

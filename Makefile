@@ -256,10 +256,11 @@ clean:
 	@rm -rf grammars/
 	@rm -f $(EXTENSION_DIR)/extension.wasm
 	@rm -rf $(EXTENSION_DIR)/grammars/
-	@# Unregister kernel
-	@if [ -d ~/.local/share/jupyter/kernels/commonlisp-zed ]; then \
-		rm -rf ~/.local/share/jupyter/kernels/commonlisp-zed; \
-		echo "$(YELLOW)  ✓ Kernel unregistered from ~/.local/share/jupyter/kernels/$(NC)"; \
+	@# Unregister kernel (XDG_DATA_HOME matches where zed-cl-lsp writes it)
+	@LINUX_KERNELS="$${XDG_DATA_HOME:-$$HOME/.local/share}/jupyter/kernels/commonlisp-zed"; \
+	if [ -d "$$LINUX_KERNELS" ]; then \
+		rm -rf "$$LINUX_KERNELS"; \
+		echo "$(YELLOW)  ✓ Kernel unregistered from $$LINUX_KERNELS$(NC)"; \
 	elif [ -d ~/Library/Jupyter/kernels/commonlisp-zed ]; then \
 		rm -rf ~/Library/Jupyter/kernels/commonlisp-zed; \
 		echo "$(YELLOW)  ✓ Kernel unregistered from ~/Library/Jupyter/kernels/$(NC)"; \
@@ -281,7 +282,7 @@ register-kernel: bundle
 	elif [ "$$(uname -s | cut -c1-5)" = "MINGW" ] || [ "$$(uname -s | cut -c1-4)" = "MSYS" ]; then \
 		JUPYTER_DIR="$$APPDATA/jupyter/kernels/commonlisp-zed"; \
 	else \
-		JUPYTER_DIR=~/.local/share/jupyter/kernels/commonlisp-zed; \
+		JUPYTER_DIR="$${XDG_DATA_HOME:-$$HOME/.local/share}/jupyter/kernels/commonlisp-zed"; \
 	fi; \
 	mkdir -p "$$JUPYTER_DIR"; \
 	KERNEL_PATH=$$(cd $(EXTENSION_BIN_DIR) && pwd)/$(KERNEL_BIN); \

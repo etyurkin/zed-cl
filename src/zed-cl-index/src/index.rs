@@ -14,6 +14,10 @@ use crate::extractor::SymbolExtractor;
 // Schema - must match exactly with main indexer
 const FILES_TABLE: TableDefinition<u32, &str> = TableDefinition::new("files");
 const SYMBOLS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("symbols");
+/// Reverse index: file_id -> bincode Vec<String> of symbol keys that file
+/// contributed. Lets a re-index purge its old entries without scanning the
+/// whole symbols table on every save.
+const FILE_KEYS_TABLE: TableDefinition<u32, &[u8]> = TableDefinition::new("file-keys");
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SymbolLocation {
@@ -98,35 +102,13 @@ impl SymbolIndex {
         {
             // First, remove existing symbols from this file
             let mut symbols_table = write_txn.open_table(SYMBOLS_TABLE)?;
+            let mut file_keys_table = write_txn.open_table(FILE_KEYS_TABLE)?;
 
-            // Collect keys to remove (can't modify while iterating)
-            let mut keys_to_update: Vec<(String, Vec<SymbolLocation>)> = Vec::new();
-
-            for entry in symbols_table.iter()? {
-                let (key, value_bytes) = entry?;
-                let key_str = key.value().to_string();
-                let mut locations: Vec<SymbolLocation> = bincode::deserialize(value_bytes.value())?;
-
-                // Remove locations from this file
-                let original_len = locations.len();
-                locations.retain(|loc| loc.file_id != file_id);
-
-                if locations.len() != original_len {
-                    keys_to_update.push((key_str, locations));
-                }
-            }
-
-            // Update keys (either remove or update)
-            for (key, locations) in keys_to_update {
-                if locations.is_empty() {
-                    symbols_table.remove(key.as_str())?;
-                } else {
-                    let serialized = bincode::serialize(&locations)?;
-                    symbols_table.insert(key.as_str(), serialized.as_slice())?;
-                }
-            }
+            let stale_keys = stale_keys_for_file(&file_keys_table, &symbols_table, file_id)?;
+            scrub_file_locations(&mut symbols_table, &stale_keys, file_id)?;
 
             // Add new symbols
+            let mut new_keys: Vec<String> = Vec::with_capacity(definitions.len());
             for def in &definitions {
                 let key = format!("{}::{}", pkg.to_uppercase(), def.name.to_uppercase());
 
@@ -139,10 +121,14 @@ impl SymbolIndex {
                 };
 
                 // Get existing locations or create new vector
-                let mut locations = if let Some(value_bytes) = symbols_table.get(key.as_str())? {
-                    bincode::deserialize::<Vec<SymbolLocation>>(value_bytes.value())?
-                } else {
-                    Vec::new()
+                let mut locations = {
+                    let existing = symbols_table.get(key.as_str())?;
+                    match existing {
+                        Some(value_bytes) => {
+                            bincode::deserialize::<Vec<SymbolLocation>>(value_bytes.value())?
+                        }
+                        None => Vec::new(),
+                    }
                 };
 
                 // Add new location (we already removed old ones from this file)
@@ -151,7 +137,11 @@ impl SymbolIndex {
                 // Store back
                 let serialized = bincode::serialize(&locations)?;
                 symbols_table.insert(key.as_str(), serialized.as_slice())?;
+                new_keys.push(key);
             }
+
+            let serialized_keys = bincode::serialize(&new_keys)?;
+            file_keys_table.insert(file_id, serialized_keys.as_slice())?;
         }
 
         write_txn.commit()?;
@@ -178,30 +168,11 @@ impl SymbolIndex {
         {
             // Remove from symbols table
             let mut symbols_table = write_txn.open_table(SYMBOLS_TABLE)?;
+            let mut file_keys_table = write_txn.open_table(FILE_KEYS_TABLE)?;
 
-            let mut keys_to_update: Vec<(String, Vec<SymbolLocation>)> = Vec::new();
-
-            for entry in symbols_table.iter()? {
-                let (key, value_bytes) = entry?;
-                let key_str = key.value().to_string();
-                let mut locations: Vec<SymbolLocation> = bincode::deserialize(value_bytes.value())?;
-
-                let original_len = locations.len();
-                locations.retain(|loc| loc.file_id != file_id);
-
-                if locations.len() != original_len {
-                    keys_to_update.push((key_str, locations));
-                }
-            }
-
-            for (key, locations) in keys_to_update {
-                if locations.is_empty() {
-                    symbols_table.remove(key.as_str())?;
-                } else {
-                    let serialized = bincode::serialize(&locations)?;
-                    symbols_table.insert(key.as_str(), serialized.as_slice())?;
-                }
-            }
+            let stale_keys = stale_keys_for_file(&file_keys_table, &symbols_table, file_id)?;
+            scrub_file_locations(&mut symbols_table, &stale_keys, file_id)?;
+            file_keys_table.remove(file_id)?;
         }
 
         write_txn.commit()?;
@@ -276,6 +247,57 @@ impl SymbolIndex {
             symbol_count: symbol_count as usize,
         })
     }
+}
+
+/// Keys whose location lists mention `file_id`. Uses the reverse table when
+/// present; an index written before the reverse table existed falls back to
+/// one full scan (and gains its reverse entry on this write).
+fn stale_keys_for_file(
+    file_keys_table: &redb::Table<'_, u32, &'static [u8]>,
+    symbols_table: &redb::Table<'_, &'static str, &'static [u8]>,
+    file_id: u32,
+) -> Result<Vec<String>> {
+    if let Some(bytes) = file_keys_table.get(file_id)? {
+        return Ok(bincode::deserialize(bytes.value())?);
+    }
+    let mut keys = Vec::new();
+    for entry in symbols_table.iter()? {
+        let (key, value_bytes) = entry?;
+        let locations: Vec<SymbolLocation> = bincode::deserialize(value_bytes.value())?;
+        if locations.iter().any(|loc| loc.file_id == file_id) {
+            keys.push(key.value().to_string());
+        }
+    }
+    Ok(keys)
+}
+
+/// Drop `file_id`'s locations from each key, removing keys left empty.
+fn scrub_file_locations(
+    symbols_table: &mut redb::Table<'_, &'static str, &'static [u8]>,
+    keys: &[String],
+    file_id: u32,
+) -> Result<()> {
+    for key in keys {
+        let locations = {
+            let existing = symbols_table.get(key.as_str())?;
+            match existing {
+                Some(bytes) => Some(bincode::deserialize::<Vec<SymbolLocation>>(bytes.value())?),
+                None => None,
+            }
+        };
+        let Some(mut locations) = locations else {
+            continue;
+        };
+        let original_len = locations.len();
+        locations.retain(|loc| loc.file_id != file_id);
+        if locations.is_empty() {
+            symbols_table.remove(key.as_str())?;
+        } else if locations.len() != original_len {
+            let serialized = bincode::serialize(&locations)?;
+            symbols_table.insert(key.as_str(), serialized.as_slice())?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

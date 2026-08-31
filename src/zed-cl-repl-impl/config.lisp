@@ -11,7 +11,8 @@
    #:data-dir
    #:connection-file-path
    #:write-connection-file
-   #:read-connection-file))
+   #:read-connection-file
+   #:read-connection-token))
 
 (in-package :zed-cl.config)
 
@@ -88,17 +89,52 @@
           (when (and host port)
             (cons host port)))))))
 
-(defun write-connection-file (host port)
+(defun harden-file-permissions (path)
+  "Best-effort chmod 600: the file carries the auth token, and other users on
+the machine must not be able to read it. On Windows the profile directory
+ACLs already restrict other users."
+  #+(and sbcl unix)
+  (handler-case
+      (progn
+        (require :sb-posix)
+        (let ((chmod (find-symbol "CHMOD" :sb-posix)))
+          (when chmod
+            (funcall chmod (namestring path) #o600))))
+    (error () nil))
+  #+(and ecl unix)
+  (let ((chmod (or (find-symbol "CHMOD" :ext) (find-symbol "CHMOD" :si))))
+    (when chmod
+      (ignore-errors (funcall chmod (namestring path) #o600))))
+  path)
+
+(defun write-connection-file (host port &optional token)
   (let* ((path (connection-file-path))
          (tmp (pathname (concatenate 'string (namestring path) ".tmp"))))
     (ensure-directories-exist path)
     (with-open-file (out tmp :direction :output :if-exists :supersede
                          :if-does-not-exist :create)
-      (format out "{\"host\":~S,\"port\":~D}~%" host port))
+      (if token
+          (format out "{\"host\":~S,\"port\":~D,\"token\":~S}~%" host port token)
+          (format out "{\"host\":~S,\"port\":~D}~%" host port)))
+    (harden-file-permissions tmp)
     (when (probe-file path)
       (delete-file path))
     (rename-file tmp path)
     path))
+
+(defun read-connection-token (&optional impl)
+  "Auth token from the connection file, or NIL for a pre-auth server."
+  (let ((path (connection-file-path impl)))
+    (when (probe-file path)
+      (with-open-file (in path)
+        (let ((line (read-line in nil nil)))
+          (when line
+            (let ((pos (search "\"token\":" line)))
+              (when pos
+                (let* ((start (position #\" line :start (+ pos 8)))
+                       (end (and start (position #\" line :start (1+ start)))))
+                  (when end
+                    (subseq line (1+ start) end)))))))))))
 
 (defun read-connection-file (&optional impl)
   (let ((path (connection-file-path impl)))

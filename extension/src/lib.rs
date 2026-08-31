@@ -50,6 +50,32 @@ impl CommonLispExtension {
         None
     }
 
+    /// A binary left by a previous auto-download in zed-cl-<version>/, so a
+    /// restart works without reaching GitHub.
+    fn versioned_binary(name: &str) -> Option<String> {
+        let file = Self::binary_name(name);
+        let mut candidates: Vec<PathBuf> = fs::read_dir(".")
+            .ok()?
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|n| n.starts_with("zed-cl-"))
+            })
+            .map(|entry| entry.path().join(&file))
+            .filter(|path| path.is_file())
+            .collect();
+        candidates.sort();
+        candidates
+            .pop()
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
+    /// Path under ~/.zed-cl/bin, returned unchecked: the WASI sandbox cannot
+    /// stat host paths, but Zed spawns the command on the host where it
+    /// resolves. Do not add an is_file() guard here - it always fails in the
+    /// sandbox and silently disables this fallback.
     fn home_binary(worktree: &zed::Worktree, name: &str) -> Option<String> {
         let home = Self::env_value(worktree, "HOME")
             .or_else(|| Self::env_value(worktree, "USERPROFILE"))?;
@@ -93,7 +119,7 @@ impl CommonLispExtension {
         )
         .map_err(|e| {
             format!(
-                "no GitHub release for {GITHUB_REPO} ({e}). Built binaries belong in ~/.zed-cl/bin"
+                "no GitHub release for {GITHUB_REPO} ({e}). Install zed-cl-lsp so it is on PATH."
             )
         })?;
 
@@ -104,7 +130,7 @@ impl CommonLispExtension {
             .find(|asset| asset.name == asset_name)
             .ok_or_else(|| {
                 format!(
-                    "No GitHub release asset named {asset_name}. Build locally with `make build` or wait for a release."
+                    "No GitHub release asset named {asset_name}. Install zed-cl-lsp so it is on PATH, or build it with `make build`."
                 )
             })?;
 
@@ -151,10 +177,9 @@ impl CommonLispExtension {
                 return Ok(path.clone());
             }
         }
-        if let Some(path) = Self::home_binary(worktree, "zed-cl-lsp") {
-            if Path::new(&path).is_file() {
-                return Ok(path);
-            }
+        if let Some(path) = Self::versioned_binary("zed-cl-lsp") {
+            self.cached_lsp_path = Some(path.clone());
+            return Ok(path);
         }
         if !self.github_unavailable {
             match self.download_binaries(language_server_id) {
@@ -162,26 +187,13 @@ impl CommonLispExtension {
                 Err(_) => self.github_unavailable = true,
             }
         }
-        Self::home_binary(worktree, "zed-cl-lsp").ok_or_else(|| {
-            "zed-cl-lsp not found on PATH or in ~/.zed-cl/bin. Run `make build`."
-                .to_string()
-        })
-    }
-
-    fn kernel_binary_path(&self, worktree: &zed::Worktree) -> Option<String> {
-        if let Some(path) = worktree.which(&Self::binary_name("zed-cl-kernel")) {
-            return Some(path);
+        if let Some(path) = Self::home_binary(worktree, "zed-cl-lsp") {
+            return Ok(path);
         }
-        Self::local_binary("zed-cl-kernel")
-            .or_else(|| Self::home_binary(worktree, "zed-cl-kernel"))
-            .or_else(|| {
-                self.cached_lsp_path.as_ref().map(|lsp| {
-                    lsp.replace(
-                        &Self::binary_name("zed-cl-lsp"),
-                        &Self::binary_name("zed-cl-kernel"),
-                    )
-                })
-            })
+        Err(
+            "zed-cl-lsp not found on PATH or in the extension work directory, and it could not be downloaded from GitHub."
+                .to_string(),
+        )
     }
 
     fn env_value(worktree: &zed::Worktree, key: &str) -> Option<String> {
@@ -190,24 +202,6 @@ impl CommonLispExtension {
             .into_iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(key))
             .map(|(_, v)| v)
-    }
-
-    fn jupyter_kernel_dir(worktree: &zed::Worktree) -> PathBuf {
-        let (os, _) = zed::current_platform();
-        match os {
-            zed::Os::Mac => {
-                let home = Self::env_value(worktree, "HOME").unwrap_or_else(|| ".".to_string());
-                PathBuf::from(home).join("Library/Jupyter/kernels/commonlisp-zed")
-            }
-            zed::Os::Windows => {
-                let appdata = Self::env_value(worktree, "APPDATA").unwrap_or_else(|| ".".to_string());
-                PathBuf::from(appdata).join("jupyter/kernels/commonlisp-zed")
-            }
-            zed::Os::Linux => {
-                let home = Self::env_value(worktree, "HOME").unwrap_or_else(|| ".".to_string());
-                PathBuf::from(home).join(".local/share/jupyter/kernels/commonlisp-zed")
-            }
-        }
     }
 
     fn write_repl_sources(&self, work_dir: &Path) -> Result<(), String> {
@@ -226,38 +220,6 @@ impl CommonLispExtension {
         write("display.lisp", DISPLAY)?;
         write("socket-server.lisp", SOCKET_SERVER)?;
         write("master-repl.lisp", MASTER_REPL)?;
-        Ok(())
-    }
-
-    fn register_kernel(&self, worktree: &zed::Worktree, kernel_path: &str, extension_dir: &str) -> Result<(), String> {
-        let jupyter_dir = Self::jupyter_kernel_dir(worktree);
-        fs::create_dir_all(&jupyter_dir)
-            .map_err(|e| format!("Failed to create Jupyter kernel directory: {e}"))?;
-        let kernel_path = kernel_path.replace('\\', "/");
-        let extension_dir = extension_dir.replace('\\', "/");
-        let mut env = serde_json::Map::new();
-        env.insert("RUST_LOG".into(), serde_json::Value::String("info".into()));
-        env.insert(
-            "ZED_CL_EXTENSION_DIR".into(),
-            serde_json::Value::String(extension_dir),
-        );
-        for key in WORKTREE_ENV_KEYS {
-            if let Some(value) = Self::env_value(worktree, key) {
-                env.insert((*key).into(), serde_json::Value::String(value));
-            }
-        }
-        let kernel = serde_json::json!({
-            "display_name": "Common Lisp (Zed)",
-            "language": "Common Lisp",
-            "argv": [kernel_path, "{connection_file}"],
-            "env": env,
-            "interrupt_mode": "message",
-            "metadata": { "debugger": false }
-        });
-        let body = serde_json::to_string_pretty(&kernel)
-            .map_err(|e| format!("Failed to serialize kernel.json: {e}"))?;
-        fs::write(jupyter_dir.join("kernel.json"), body)
-            .map_err(|e| format!("Failed to write kernel.json: {e}"))?;
         Ok(())
     }
 }
@@ -377,16 +339,6 @@ impl zed::Extension for CommonLispExtension {
         self.write_repl_sources(&work_dir)?;
 
         let lsp_binary = self.language_server_binary_path(language_server_id, worktree)?;
-        if let Some(kernel_path) = self.kernel_binary_path(worktree) {
-            let abs_kernel = Path::new(&kernel_path)
-                .canonicalize()
-                .unwrap_or_else(|_| PathBuf::from(&kernel_path));
-            let _ = self.register_kernel(
-                worktree,
-                &abs_kernel.to_string_lossy(),
-                &work_dir.to_string_lossy(),
-            );
-        }
 
         let settings = LspSettings::for_worktree(LANGUAGE_SERVER_ID, worktree)
             .ok()

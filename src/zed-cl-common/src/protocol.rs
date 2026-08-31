@@ -46,6 +46,15 @@ pub enum ReplRequest {
     Ping {
         id: String,
     },
+    /// Connection handshake carrying the shared secret from the connection file.
+    Auth {
+        id: String,
+        token: String,
+    },
+    /// Abort the eval currently running in the master REPL, if any.
+    Interrupt {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,7 +126,9 @@ impl ReplRequest {
             | ReplRequest::Eval { id, .. }
             | ReplRequest::LoadFile { id, .. }
             | ReplRequest::SetCurrentFile { id, .. }
-            | ReplRequest::Ping { id } => id,
+            | ReplRequest::Ping { id }
+            | ReplRequest::Auth { id, .. }
+            | ReplRequest::Interrupt { id } => id,
         }
     }
 
@@ -128,8 +139,23 @@ impl ReplRequest {
             | ReplRequest::Eval { id, .. }
             | ReplRequest::LoadFile { id, .. }
             | ReplRequest::SetCurrentFile { id, .. }
-            | ReplRequest::Ping { id } => id,
+            | ReplRequest::Ping { id }
+            | ReplRequest::Auth { id, .. }
+            | ReplRequest::Interrupt { id } => id,
         }
+    }
+
+    /// True when re-sending after a transport failure cannot repeat a side effect.
+    pub fn is_idempotent(&self) -> bool {
+        matches!(
+            self,
+            ReplRequest::SymbolInfo { .. }
+                | ReplRequest::ListSymbols { .. }
+                | ReplRequest::SetCurrentFile { .. }
+                | ReplRequest::Ping { .. }
+                | ReplRequest::Auth { .. }
+                | ReplRequest::Interrupt { .. }
+        )
     }
 
     pub fn to_sexp(&self) -> String {
@@ -197,6 +223,16 @@ impl ReplRequest {
             }
             ReplRequest::Ping { id } => {
                 format!("(:type \"ping\" :id {})", lisp_string(id))
+            }
+            ReplRequest::Auth { id, token } => {
+                format!(
+                    "(:type \"auth\" :id {} :token {})",
+                    lisp_string(id),
+                    lisp_string(token)
+                )
+            }
+            ReplRequest::Interrupt { id } => {
+                format!("(:type \"interrupt\" :id {})", lisp_string(id))
             }
         }
     }
@@ -549,6 +585,19 @@ mod tests {
         let sexp = request.to_sexp();
         assert!(sexp.contains(":prefix \"MAP\""));
         assert!(sexp.contains(":package \"MY-APP\""));
+    }
+
+    #[test]
+    fn only_side_effect_free_requests_are_idempotent() {
+        assert!(!ReplRequest::Eval {
+            id: "1".into(),
+            code: "(+ 1 2)".into(),
+            package: None,
+            file_path: None,
+        }
+        .is_idempotent());
+        assert!(!ReplRequest::LoadFile { id: "1".into(), path: "a.lisp".into() }.is_idempotent());
+        assert!(ReplRequest::Ping { id: "1".into() }.is_idempotent());
     }
 
     #[test]

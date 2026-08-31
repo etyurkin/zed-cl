@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [master]
+    # all branches; the filter also keeps v* tags from double-building with release.yml
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 
@@ -15,6 +16,8 @@ env:
   CARGO_TARGET_DIR: target
 
 jobs:
+  # test and wasm run on both push and pull_request so same-repo PR merge
+  # commits still get checked; only the 4-runner build matrix is deduplicated.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -35,6 +38,7 @@ jobs:
       - run: cargo build --release --target wasm32-wasip2 --manifest-path extension/Cargo.toml
 
   build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     strategy:
       fail-fast: false
       matrix:

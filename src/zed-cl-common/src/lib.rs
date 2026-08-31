@@ -1,6 +1,7 @@
 /// Common library for talking to the master Lisp REPL over TCP.
 
 mod config;
+pub mod kernelspec;
 mod master_repl;
 mod protocol;
 

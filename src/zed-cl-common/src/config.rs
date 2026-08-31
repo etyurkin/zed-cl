@@ -34,6 +34,10 @@ pub struct Profile {
 pub struct ReplConnection {
     pub host: String,
     pub port: u16,
+    /// Shared secret the master REPL requires in the connection handshake.
+    /// Absent when talking to a pre-1.1 server.
+    #[serde(default)]
+    pub token: Option<String>,
 }
 
 fn default_active_profile() -> String {

@@ -1,6 +1,6 @@
 [package]
 name = "zed-commonlisp"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2021"
 
 [lib]
@@ -8,5 +8,3 @@ crate-type = ["cdylib"]
 
 [dependencies]
 zed_extension_api = "0.6.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"

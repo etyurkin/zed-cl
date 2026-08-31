@@ -18,7 +18,8 @@
                 #:system-package-p
                 #:with-source-tracking)
   (:import-from :zed-cl.socket-server
-                #:write-frame)
+                #:write-frame
+                #:client-interrupt)
   (:export #:start-master-repl))
 
 (in-package :zed-cl.master-repl)
@@ -34,6 +35,10 @@
   #+sbcl (sb-thread:make-mutex :name "zed-cl-request")
   #+ecl (mp:make-lock)
   #-(or sbcl ecl) nil)
+
+(defvar *eval-thread* nil
+  "Thread currently running an eval, so an interrupt request from another
+connection can target it. NIL when no eval is in flight.")
 
 (defparameter *max-completion-symbols* 500)
 
@@ -285,8 +290,7 @@
     (do-all-symbols (s)
       (when (and (string= (symbol-name s) (string-upcase symbol-name))
                  (symbol-package s)
-                 (user-package-p (symbol-package s))
-                 (eq (symbol-package s) (symbol-package s)))
+                 (user-package-p (symbol-package s)))
         (return-from found s)))
     nil))
 
@@ -413,17 +417,24 @@
 
 (defun eval-with-output-capture (code &optional file-path)
   "Evaluate code with output capture, return (values error displays)"
-  (let ((output (make-string-output-stream)))
+  (let ((output (make-string-output-stream))
+        (backtrace nil))
     (handler-case
-        (let ((*standard-output* output)
-              (*error-output* output)
-              (*trace-output* output)
-              #+sbcl (sb-ext:*muffled-warnings* nil))
-          (clear-display-outputs)
-          (let ((values (eval-forms-from-code code file-path)))
-            (update-package-whitelist)
-            (list values (get-output-stream-string output) nil nil
-                  (collect-display-outputs))))
+        ;; HANDLER-CASE unwinds the stack before running a clause, so the
+        ;; backtrace must be captured here, at signal time, while the frames
+        ;; below the error still exist.
+        (handler-bind ((error (lambda (e)
+                                (declare (ignore e))
+                                (setf backtrace (capture-backtrace)))))
+          (let ((*standard-output* output)
+                (*error-output* output)
+                (*trace-output* output)
+                #+sbcl (sb-ext:*muffled-warnings* nil))
+            (clear-display-outputs)
+            (let ((values (eval-forms-from-code code file-path)))
+              (update-package-whitelist)
+              (list values (get-output-stream-string output) nil nil
+                    (collect-display-outputs)))))
       (end-of-file ()
         (list nil (get-output-stream-string output)
               "Incomplete code: unbalanced parentheses"
@@ -431,7 +442,7 @@
       (error (e)
         (list nil (get-output-stream-string output)
               (format nil "~A" e)
-              (capture-backtrace) nil)))))
+              (or backtrace (capture-backtrace)) nil)))))
 
 (defun eval-code (code &optional file-path)
   "Evaluate code in the master REPL, return (output values error traceback displays)"
@@ -449,21 +460,60 @@
   "Build response for eval request"
   (let ((response (list :id msg-id
                         :output (getf result :output)
-                        :values (mapcar #'prin1-to-string
-                                        (remove nil (getf result :values)))
+                        :values (mapcar #'prin1-to-string (getf result :values))
                         :error (getf result :error)
                         :traceback (getf result :traceback))))
     (when (getf result :displays)
       (setf response (append response (list :displays (getf result :displays)))))
     response))
 
+(defun current-thread ()
+  #+sbcl sb-thread:*current-thread*
+  #+ecl mp:*current-process*
+  #-(or sbcl ecl) nil)
+
+(defmacro with-deferred-interrupts (&body body)
+  "Delay thread interruptions so a response frame is written whole."
+  #+sbcl `(sb-sys:without-interrupts ,@body)
+  #+ecl `(mp:without-interrupts ,@body)
+  #-(or sbcl ecl) `(progn ,@body))
+
 (defun handle-eval-message (msg-id code file-path stream)
   "Handle eval message type"
   (log-error "Eval request: ~A from ~A"
              (subseq code 0 (min 50 (length code)))
              (or file-path "interactive"))
-  (let ((result (eval-code code file-path)))
-    (write-message stream (build-eval-response msg-id result))))
+  (setf *eval-thread* (current-thread))
+  (let ((result (unwind-protect
+                     (eval-code code file-path)
+                  (setf *eval-thread* nil)))
+        (sent nil))
+    ;; An interrupt aimed at the eval can land after it finished. The client
+    ;; has no read deadline on evals, so the response must go out exactly
+    ;; once even if the interruption unwinds this frame mid-flight.
+    (flet ((send-once ()
+             (with-deferred-interrupts
+               (unless sent
+                 (setf sent t)
+                 (write-message stream (build-eval-response msg-id result))))))
+      (handler-case (send-once)
+        (client-interrupt () (send-once))))))
+
+(defun handle-interrupt-message (msg-id stream)
+  "Abort the eval running in another connection's thread, if any."
+  (let ((thread *eval-thread*))
+    (if thread
+        (progn
+          (log-error "Interrupting eval thread")
+          #+sbcl (ignore-errors
+                   (sb-thread:interrupt-thread
+                    thread (lambda () (error 'client-interrupt))))
+          #+ecl (ignore-errors
+                  (mp:interrupt-process
+                   thread (lambda () (error 'client-interrupt))))
+          #-(or sbcl ecl) nil)
+        (log-error "Interrupt requested but no eval running")))
+  (write-message stream (list :id msg-id :ok t)))
 
 (defun handle-ping-message (msg-id stream)
   "Handle ping message type"
@@ -523,7 +573,13 @@
     ((string= msg-type "symbol-info")
      (handle-symbol-info-message msg-id (getf message :symbol)
                                  (getf message :package) stream))
-    (t (log-error "Unknown message type: ~A" msg-type))))
+    ((string= msg-type "interrupt")
+     (handle-interrupt-message msg-id stream))
+    (t (log-error "Unknown message type: ~A" msg-type)
+       ;; Always answer, or the client blocks until its read times out.
+       (write-message stream
+                      (list :id (or msg-id "unknown")
+                            :error (format nil "Unknown message type: ~A" msg-type))))))
 
 (defun handle-request (stream message)
   (log-error "~A id=~A" (getf message :type) (getf message :id))
@@ -534,15 +590,24 @@
 
 ;;;; Socket Server Integration
 
+(defun lock-free-request-p (message)
+  "Interrupt (and ping) must not queue behind the eval they are meant to
+reach, so they bypass the request mutex. Both only write to their own
+connection's stream."
+  (member (getf message :type) '("interrupt" "ping") :test #'equal))
+
 (defun message-handler (message stream)
-  #+sbcl
-  (sb-thread:with-mutex (*request-lock*)
-    (handle-request stream message))
-  #+ecl
-  (mp:with-lock (*request-lock*)
-    (handle-request stream message))
-  #-(or sbcl ecl)
-  (handle-request stream message))
+  (if (lock-free-request-p message)
+      (handle-request stream message)
+      (progn
+        #+sbcl
+        (sb-thread:with-mutex (*request-lock*)
+          (handle-request stream message))
+        #+ecl
+        (mp:with-lock (*request-lock*)
+          (handle-request stream message))
+        #-(or sbcl ecl)
+        (handle-request stream message))))
 
 (defun start-master-repl ()
   "Start the master REPL TCP server on 127.0.0.1"

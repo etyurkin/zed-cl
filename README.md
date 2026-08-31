@@ -9,7 +9,7 @@ Common Lisp language support for the Zed editor with integrated LSP server and J
 - **LSP Features**: Syntax highlighting, autocomplete, hover documentation, goto-definition
 - **Smart Completion**: Type-aware parameter snippets, package-qualified completions
 - **Multi-Package Support**: Package labels, user symbols prioritized
-- **Interactive REPL**: Built-in REPL with `Ctrl+Shift+Enter`, shared state across files
+- **Interactive REPL**: Built-in REPL with `Ctrl+Shift+Enter`, shared state across files, interruptible evals
 - **Rich Output**: Display markdown, tables, images, and JSON inline
 - **Jupyter Compatible**: Optional Jupyter Lab/Notebook support
 - **Cross-Platform**: macOS, Linux, and Windows
@@ -20,8 +20,9 @@ Common Lisp language support for the Zed editor with integrated LSP server and J
 2. **SBCL** on PATH (`sbcl --version` must work in a new terminal). After installing on Windows, fully quit and reopen Zed so it inherits PATH.
    - macOS: `brew install sbcl`
    - Linux: `apt install sbcl` / `dnf install sbcl` / `pacman -S sbcl`
-   - Windows: [sbcl.org](http://www.sbcl.org/platform-table.html) (x86-64), or Scoop `scoop install sbcl`
-3. **From source only:** [rustup](https://rustup.rs/) with `wasm32-wasip2` (`rustup target add wasm32-wasip2`). Zed loads the WASM `make` produces; it does not compile the extension itself.
+   - Windows: `scoop install sbcl`, `winget install SBCL.SBCL`, or [sbcl.org](http://www.sbcl.org/platform-table.html) (x86-64)
+
+That is all you need to *use* the extension. Rust, `make`, and the wasi-sdk are only required to build from source.
 
 ECL is optional (`lisp_impl` in `~/.zed-cl/config.json`) where `sb-bsd-sockets` is available.
 
@@ -29,9 +30,20 @@ Quicklisp is optional. The REPL starts without it; `config.json` is used when `c
 
 ## Installation
 
-You need two things: the **Zed extension** (`extension.toml` + `extension.wasm` + `languages/`) and **native tools** (`zed-cl-lsp`, `zed-cl-kernel`, `zed-cl-index`, `zed-cl-repl`). Zed does not compile either.
+1. Install SBCL (see above) and restart Zed.
+2. Open the extensions view: command palette (`Cmd+Shift+P` / `Ctrl+Shift+P`) → `zed: extensions`.
+3. Search for **Common Lisp** and click Install.
+4. Open a `.lisp` file.
 
-Pick your OS zip:
+Zed's registry ships the prebuilt WASM and tree-sitter grammar, so nothing is compiled on your machine. On first use the extension downloads the native tools (`zed-cl-lsp`, `zed-cl-kernel`, `zed-cl-index`, `zed-cl-repl`) for your platform from this repository's releases, and `zed-cl-lsp` registers the Jupyter kernelspec that Zed's REPL uses.
+
+If eval does not appear in a `.lisp` buffer, run `repl: refresh kernelspecs`.
+
+**Upgrading from 1.0.x:** the REPL connection now uses an auth token (the master REPL only accepts local clients that present the secret from `~/.zed-cl/repl-sbcl.json`). A master REPL left running from an older version rejects the new handshake — kill the old `sbcl` master-repl process (or reboot) and it restarts automatically.
+
+### Installing the native tools yourself
+
+Only needed if the automatic download is blocked (offline, proxy, firewall). Put the binaries in `~/.zed-cl/bin` — the extension looks there automatically — or anywhere on PATH:
 
 | Machine | Native zip |
 |---|---|
@@ -39,18 +51,6 @@ Pick your OS zip:
 | macOS Intel | `zed-cl-macos-x86_64.zip` |
 | Linux x86_64 | `zed-cl-linux-x86_64.zip` |
 | Windows x86_64 | `zed-cl-windows-x86_64.zip` |
-
-### From a GitHub Release (no Rust, no `make`)
-
-Use this after a tagged release (for example `v1.0.1`).
-
-1. Open [Releases](https://github.com/etyurkin/zed-cl/releases) and download:
-   - `zed-cl-extension.zip`
-   - the native zip for your machine (table above)
-2. Unzip `zed-cl-extension.zip` somewhere you will keep (Zed loads it from that path):
-   - macOS / Linux: `~/zed-cl-extension`
-   - Windows: `%USERPROFILE%\zed-cl-extension`
-3. Unzip the native tools into `~/.zed-cl/bin`:
 
 ```bash
 mkdir -p ~/.zed-cl/bin
@@ -65,14 +65,18 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.zed-cl\bin" | Out-Null
 Expand-Archive -Force zed-cl-windows-x86_64.zip "$env:USERPROFILE\.zed-cl\bin"
 ```
 
-4. In Zed: command palette (`Cmd+Shift+P` / `Ctrl+Shift+P`) → `zed: install dev extension` → select the unzipped **extension** folder (it must contain `extension.toml` and `extension.wasm`).
-5. Open a `.lisp` file. If the status bar shows a language-server error, run **Restart Server** on `zed-cl`. If eval does not appear, run `repl: refresh kernelspecs`.
+Optionally add the directory to your user PATH (never `setx PATH "$env:PATH;..."` — that copies the machine PATH into the user PATH and truncates at 1024 characters):
 
-You can skip step 3: the extension downloads the native zip from the same release. If that fails, put the binaries in `~/.zed-cl/bin` as above.
+```powershell
+$userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
+[Environment]::SetEnvironmentVariable('PATH', "$userPath;$env:USERPROFILE\.zed-cl\bin", 'User')
+```
 
-### From source
+Fully quit and reopen Zed afterwards so it picks up the new binaries.
 
-Needs [rustup](https://rustup.rs/) with `wasm32-wasip2` (`rustup target add wasm32-wasip2`).
+## Building from source
+
+Only for development on the extension itself. Needs [rustup](https://rustup.rs/) with `wasm32-wasip2` (`rustup target add wasm32-wasip2`).
 
 ```bash
 git clone https://github.com/etyurkin/zed-cl
@@ -80,15 +84,15 @@ cd zed-cl
 make build
 ```
 
-Then in Zed: `zed: install dev extension` → the `extension/` directory (the one with `extension.toml` and `extension.wasm`). `make` writes native tools to `~/.zed-cl/bin` and copies `extension.wasm` into `extension/`.
+Then in Zed: `zed: install dev extension` → the `extension/` directory (the one with `extension.toml` and `extension.wasm`). `make` writes native tools to `~/.zed-cl/bin`, copies them into Zed's extension work directory, and copies `extension.wasm` into `extension/`.
 
 After Lisp or native LSP changes, run `make bundle` so Zed's work-dir binaries are not stale. If Zed recompiles the linked extension (for example after editing `extension.toml`), it **stops** `zed-cl` and does not start it again. Reopen the `.lisp` buffer, or command palette → **language server: restart**.
 
 On Windows without Make, build the four native crates with `cargo build --release --manifest-path src/zed-cl-lsp/Cargo.toml` (and kernel/index/repl), copy `*.exe` into `bin\` and `%USERPROFILE%\.zed-cl\bin`, build the WASM crate with `cargo build --release --target wasm32-wasip2 --manifest-path extension/Cargo.toml`, copy `zed_commonlisp.wasm` to `extension\extension.wasm`, then install the `extension\` directory as above.
 
-#### Windows: "Failed to resolve clang path"
+### Windows: "Failed to resolve clang path"
 
-`install dev extension` makes Zed compile the Tree-sitter grammar itself, which needs clang from the `wasi-sdk`. Zed downloads it on demand; when that fails you get `Failed to resolve clang path`, and the real cause is only in the log (`zed: open log`, search for `wasi-sdk`). Install the SDK yourself and point Zed at it:
+This affects `install dev extension` only — installing from Zed's extension registry never hits it. `install dev extension` makes Zed compile the Tree-sitter grammar itself, which needs clang from the `wasi-sdk`. Zed downloads it on demand; when that fails you get `Failed to resolve clang path`, and the real cause is only in the log (`zed: open log`, search for `wasi-sdk`). Install the SDK yourself and point Zed at it:
 
 ```powershell
 curl.exe -L -o "$env:TEMP\wasi-sdk.tar.gz" `

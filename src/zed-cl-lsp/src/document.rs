@@ -66,15 +66,20 @@ fn position_to_offset(text: &str, position: Position) -> usize {
 
     for (i, ch) in text.char_indices() {
         if current_line == position.line as usize {
-            // Found target line, add character offset
+            // Found target line; count UTF-16 units (the LSP wire format) and
+            // stop at the end of the line so an overshoot cannot spill into
+            // the next one.
             let line_start = offset;
-            let line_text = &text[line_start..];
-            let char_offset = line_text
-                .chars()
-                .take(position.character as usize)
-                .map(|c| c.len_utf8())
-                .sum::<usize>();
-            return line_start + char_offset;
+            let mut units = 0u32;
+            let mut bytes = 0usize;
+            for c in text[line_start..].chars() {
+                if units >= position.character || c == '\n' {
+                    break;
+                }
+                units += c.len_utf16() as u32;
+                bytes += c.len_utf8();
+            }
+            return line_start + bytes;
         }
 
         if ch == '\n' {
@@ -84,4 +89,22 @@ fn position_to_offset(text: &str, position: Position) -> usize {
     }
 
     text.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn incremental_change_uses_utf16_columns() {
+        // A non-BMP char is 1 char but 2 UTF-16 units; the old char-counting
+        // math placed this edit past the end of the string.
+        let mut text = String::from("(\u{1f600})");
+        let range = Range {
+            start: Position { line: 0, character: 3 },
+            end: Position { line: 0, character: 4 },
+        };
+        apply_change(&mut text, range, " x)");
+        assert_eq!(text, "(\u{1f600} x)");
+    }
 }

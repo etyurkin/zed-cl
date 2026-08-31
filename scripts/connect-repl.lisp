@@ -34,6 +34,22 @@
 (defun host-vector ()
   #(127 0 0 1))
 
+(defun authenticate (lisp-impl)
+  "Present the shared token from the connection file; older servers without
+auth accept a plain ping instead."
+  (let ((token (zed-cl.config:read-connection-token lisp-impl)))
+    (if token
+        (zed-cl.socket-server:write-frame *socket-stream*
+                                          `(:type "auth" :id "handshake" :token ,token))
+        (zed-cl.socket-server:write-frame *socket-stream*
+                                          `(:type "ping" :id "handshake"))))
+  (let ((response (zed-cl.socket-server:read-frame *socket-stream*)))
+    (when (or (eq response :eof)
+              (and (listp response) (getf response :error)))
+      (format t "~&Error: master REPL rejected the connection~@[: ~A~]~%"
+              (and (listp response) (getf response :error)))
+      (exit-with-code 1))))
+
 (defun connect-to-master-repl ()
   (let* ((lisp-impl (zed-cl.config:get-profile-setting :lisp--impl "sbcl"))
          (conn (zed-cl.config:read-connection-file lisp-impl)))
@@ -52,6 +68,7 @@
                                  :input t
                                  :output t
                                  :element-type '(unsigned-byte 8)))
+          (authenticate lisp-impl)
           (format t "~&; Common Lisp REPL (~A)~%" lisp-impl)
           (format t "; Connected to ~A:~A~%" (car conn) (cdr conn))
           (format t "; Press Ctrl+D to exit~%~%")

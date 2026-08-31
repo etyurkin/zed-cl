@@ -21,6 +21,9 @@ pub struct LispLspBackend {
     symbol_index: SharedSymbolIndex,
     user_index: Arc<RwLock<UserIndexManager>>,
     workspace_roots: Arc<RwLock<Vec<Url>>>,
+    /// Last file successfully announced to the REPL, so hover/goto do not pay
+    /// a REPL roundtrip for every request in the same buffer.
+    notified_file: Arc<RwLock<Option<Url>>>,
 }
 
 impl LispLspBackend {
@@ -65,6 +68,7 @@ impl LispLspBackend {
             symbol_index,
             user_index,
             workspace_roots: Arc::new(RwLock::new(Vec::new())),
+            notified_file: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -79,13 +83,19 @@ impl LispLspBackend {
         let Ok(path) = uri.to_file_path() else {
             return;
         };
-        let _ = self
+        if self.notified_file.read().await.as_ref() == Some(uri) {
+            return;
+        }
+        let sent = self
             .send_repl(ReplRequest::SetCurrentFile {
                 id: String::new(),
                 path: path.to_string_lossy().into_owned(),
                 contents: None,
             })
             .await;
+        if sent.is_ok() {
+            *self.notified_file.write().await = Some(uri.clone());
+        }
     }
 
     fn format_documentation(doc: &str) -> String {
@@ -566,7 +576,7 @@ impl LanguageServer for LispLspBackend {
             },
             server_info: Some(ServerInfo {
                 name: "cl-zed-lsp (Rust)".to_string(),
-                version: Some("0.1.0".to_string()),
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
             }),
         })
     }
@@ -797,16 +807,21 @@ impl LanguageServer for LispLspBackend {
 
         debug!("Completion prefix: {}", prefix);
 
-        // Check if we're inside a list (after an opening paren)
-        let lines: Vec<&str> = text.lines().collect();
-        let inside_paren = if (position.line as usize) < lines.len() {
-            let line = lines[position.line as usize];
-            let before_cursor = &line[..position.character.saturating_sub(prefix.len() as u32) as usize];
-            // Check if there's an opening paren before the prefix
-            before_cursor.trim_end().ends_with('(')
-        } else {
-            false
-        };
+        // Check if we are inside a list (after an opening paren). Walk chars
+        // backwards instead of slicing: LSP columns are UTF-16 units, not bytes.
+        let inside_paren = text
+            .lines()
+            .nth(position.line as usize)
+            .map(|line| {
+                let cursor = crate::symbol_extractor::utf16_col_to_byte(line, position.character);
+                line[..cursor]
+                    .chars()
+                    .rev()
+                    .skip(prefix.chars().count())
+                    .find(|c| !c.is_whitespace())
+                    == Some('(')
+            })
+            .unwrap_or(false);
 
         debug!("Inside paren: {}", inside_paren);
 
@@ -828,7 +843,9 @@ impl LanguageServer for LispLspBackend {
 
             let symbol_start = Position {
                 line: position.line,
-                character: position.character - (prefix.len() - qualifier_end) as u32,
+                character: position
+                    .character
+                    .saturating_sub(prefix[qualifier_end..].encode_utf16().count() as u32),
             };
             tower_lsp::lsp_types::Range {
                 start: symbol_start,
@@ -838,7 +855,9 @@ impl LanguageServer for LispLspBackend {
             // No package qualifier, replace entire prefix
             let prefix_start = Position {
                 line: position.line,
-                character: position.character - prefix.len() as u32,
+                character: position
+                    .character
+                    .saturating_sub(prefix.encode_utf16().count() as u32),
             };
             tower_lsp::lsp_types::Range {
                 start: prefix_start,

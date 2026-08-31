@@ -36,6 +36,11 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
+    match common_rust::kernelspec::register() {
+        Ok(path) => tracing::info!("Registered Jupyter kernelspec at {}", path.display()),
+        Err(e) => tracing::warn!("Could not register Jupyter kernelspec: {e}"),
+    }
+
     let (service, socket) = LspService::new(|client| LispLspBackend::new(client));
 
     Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)
