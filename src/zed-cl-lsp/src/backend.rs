@@ -21,6 +21,9 @@ pub struct LispLspBackend {
     symbol_index: SharedSymbolIndex,
     user_index: Arc<RwLock<UserIndexManager>>,
     workspace_roots: Arc<RwLock<Vec<Url>>>,
+    /// Last file successfully announced to the REPL, so hover/goto do not pay
+    /// a REPL roundtrip for every request in the same buffer.
+    notified_file: Arc<RwLock<Option<Url>>>,
 }
 
 impl LispLspBackend {
@@ -65,6 +68,7 @@ impl LispLspBackend {
             symbol_index,
             user_index,
             workspace_roots: Arc::new(RwLock::new(Vec::new())),
+            notified_file: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -79,13 +83,19 @@ impl LispLspBackend {
         let Ok(path) = uri.to_file_path() else {
             return;
         };
-        let _ = self
+        if self.notified_file.read().await.as_ref() == Some(uri) {
+            return;
+        }
+        let sent = self
             .send_repl(ReplRequest::SetCurrentFile {
                 id: String::new(),
                 path: path.to_string_lossy().into_owned(),
                 contents: None,
             })
             .await;
+        if sent.is_ok() {
+            *self.notified_file.write().await = Some(uri.clone());
+        }
     }
 
     fn format_documentation(doc: &str) -> String {

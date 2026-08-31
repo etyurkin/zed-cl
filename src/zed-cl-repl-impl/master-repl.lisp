@@ -18,7 +18,8 @@
                 #:system-package-p
                 #:with-source-tracking)
   (:import-from :zed-cl.socket-server
-                #:write-frame)
+                #:write-frame
+                #:client-interrupt)
   (:export #:start-master-repl))
 
 (in-package :zed-cl.master-repl)
@@ -34,6 +35,10 @@
   #+sbcl (sb-thread:make-mutex :name "zed-cl-request")
   #+ecl (mp:make-lock)
   #-(or sbcl ecl) nil)
+
+(defvar *eval-thread* nil
+  "Thread currently running an eval, so an interrupt request from another
+connection can target it. NIL when no eval is in flight.")
 
 (defparameter *max-completion-symbols* 500)
 
@@ -462,13 +467,53 @@
       (setf response (append response (list :displays (getf result :displays)))))
     response))
 
+(defun current-thread ()
+  #+sbcl sb-thread:*current-thread*
+  #+ecl mp:*current-process*
+  #-(or sbcl ecl) nil)
+
+(defmacro with-deferred-interrupts (&body body)
+  "Delay thread interruptions so a response frame is written whole."
+  #+sbcl `(sb-sys:without-interrupts ,@body)
+  #+ecl `(mp:without-interrupts ,@body)
+  #-(or sbcl ecl) `(progn ,@body))
+
 (defun handle-eval-message (msg-id code file-path stream)
   "Handle eval message type"
   (log-error "Eval request: ~A from ~A"
              (subseq code 0 (min 50 (length code)))
              (or file-path "interactive"))
-  (let ((result (eval-code code file-path)))
-    (write-message stream (build-eval-response msg-id result))))
+  (setf *eval-thread* (current-thread))
+  (let ((result (unwind-protect
+                     (eval-code code file-path)
+                  (setf *eval-thread* nil)))
+        (sent nil))
+    ;; An interrupt aimed at the eval can land after it finished. The client
+    ;; has no read deadline on evals, so the response must go out exactly
+    ;; once even if the interruption unwinds this frame mid-flight.
+    (flet ((send-once ()
+             (with-deferred-interrupts
+               (unless sent
+                 (setf sent t)
+                 (write-message stream (build-eval-response msg-id result))))))
+      (handler-case (send-once)
+        (client-interrupt () (send-once))))))
+
+(defun handle-interrupt-message (msg-id stream)
+  "Abort the eval running in another connection's thread, if any."
+  (let ((thread *eval-thread*))
+    (if thread
+        (progn
+          (log-error "Interrupting eval thread")
+          #+sbcl (ignore-errors
+                   (sb-thread:interrupt-thread
+                    thread (lambda () (error 'client-interrupt))))
+          #+ecl (ignore-errors
+                  (mp:interrupt-process
+                   thread (lambda () (error 'client-interrupt))))
+          #-(or sbcl ecl) nil)
+        (log-error "Interrupt requested but no eval running")))
+  (write-message stream (list :id msg-id :ok t)))
 
 (defun handle-ping-message (msg-id stream)
   "Handle ping message type"
@@ -528,7 +573,13 @@
     ((string= msg-type "symbol-info")
      (handle-symbol-info-message msg-id (getf message :symbol)
                                  (getf message :package) stream))
-    (t (log-error "Unknown message type: ~A" msg-type))))
+    ((string= msg-type "interrupt")
+     (handle-interrupt-message msg-id stream))
+    (t (log-error "Unknown message type: ~A" msg-type)
+       ;; Always answer, or the client blocks until its read times out.
+       (write-message stream
+                      (list :id (or msg-id "unknown")
+                            :error (format nil "Unknown message type: ~A" msg-type))))))
 
 (defun handle-request (stream message)
   (log-error "~A id=~A" (getf message :type) (getf message :id))
@@ -539,15 +590,24 @@
 
 ;;;; Socket Server Integration
 
+(defun lock-free-request-p (message)
+  "Interrupt (and ping) must not queue behind the eval they are meant to
+reach, so they bypass the request mutex. Both only write to their own
+connection's stream."
+  (member (getf message :type) '("interrupt" "ping") :test #'equal))
+
 (defun message-handler (message stream)
-  #+sbcl
-  (sb-thread:with-mutex (*request-lock*)
-    (handle-request stream message))
-  #+ecl
-  (mp:with-lock (*request-lock*)
-    (handle-request stream message))
-  #-(or sbcl ecl)
-  (handle-request stream message))
+  (if (lock-free-request-p message)
+      (handle-request stream message)
+      (progn
+        #+sbcl
+        (sb-thread:with-mutex (*request-lock*)
+          (handle-request stream message))
+        #+ecl
+        (mp:with-lock (*request-lock*)
+          (handle-request stream message))
+        #-(or sbcl ecl)
+        (handle-request stream message))))
 
 (defun start-master-repl ()
   "Start the master REPL TCP server on 127.0.0.1"

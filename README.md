@@ -9,7 +9,7 @@ Common Lisp language support for the Zed editor with integrated LSP server and J
 - **LSP Features**: Syntax highlighting, autocomplete, hover documentation, goto-definition
 - **Smart Completion**: Type-aware parameter snippets, package-qualified completions
 - **Multi-Package Support**: Package labels, user symbols prioritized
-- **Interactive REPL**: Built-in REPL with `Ctrl+Shift+Enter`, shared state across files
+- **Interactive REPL**: Built-in REPL with `Ctrl+Shift+Enter`, shared state across files, interruptible evals
 - **Rich Output**: Display markdown, tables, images, and JSON inline
 - **Jupyter Compatible**: Optional Jupyter Lab/Notebook support
 - **Cross-Platform**: macOS, Linux, and Windows
@@ -38,6 +38,8 @@ Quicklisp is optional. The REPL starts without it; `config.json` is used when `c
 Zed's registry ships the prebuilt WASM and tree-sitter grammar, so nothing is compiled on your machine. On first use the extension downloads the native tools (`zed-cl-lsp`, `zed-cl-kernel`, `zed-cl-index`, `zed-cl-repl`) for your platform from this repository's releases, and `zed-cl-lsp` registers the Jupyter kernelspec that Zed's REPL uses.
 
 If eval does not appear in a `.lisp` buffer, run `repl: refresh kernelspecs`.
+
+**Upgrading from 1.0.x:** the REPL connection now uses an auth token (the master REPL only accepts local clients that present the secret from `~/.zed-cl/repl-sbcl.json`). A master REPL left running from an older version rejects the new handshake — kill the old `sbcl` master-repl process (or reboot) and it restarts automatically.
 
 ### Installing the native tools yourself
 

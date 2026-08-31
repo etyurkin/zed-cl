@@ -16,8 +16,9 @@ env:
   CARGO_TARGET_DIR: target
 
 jobs:
+  # test and wasm run on both push and pull_request so same-repo PR merge
+  # commits still get checked; only the 4-runner build matrix is deduplicated.
   test:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +29,6 @@ jobs:
       - run: cargo test --manifest-path src/zed-cl-kernel/Cargo.toml
 
   wasm:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

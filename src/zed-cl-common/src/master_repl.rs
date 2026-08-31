@@ -8,7 +8,7 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info};
 
 use crate::config::{data_dir, log_dir, Profile};
@@ -21,6 +21,9 @@ const CONNECT_ATTEMPTS: u32 = 50;
 const SPAWN_CONNECT_ATTEMPTS: u32 = 225;
 const CONNECT_RETRY: Duration = Duration::from_millis(200);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
+/// After a failed connect-and-spawn cycle, fail fast for this long instead of
+/// blocking every LSP request in the retry loop again.
+const CONNECT_BACKOFF: Duration = Duration::from_secs(20);
 const MAX_FRAME: usize = 32 * 1024 * 1024;
 
 pub fn connection_file_path() -> PathBuf {
@@ -228,6 +231,7 @@ pub struct MasterReplClient {
     extension_dir: Option<PathBuf>,
     repl_starting: AtomicBool,
     spawn_lock: Option<SpawnLock>,
+    last_connect_failure: Option<Instant>,
 }
 
 impl MasterReplClient {
@@ -242,6 +246,7 @@ impl MasterReplClient {
             extension_dir,
             repl_starting: AtomicBool::new(false),
             spawn_lock: None,
+            last_connect_failure: None,
         }
     }
 
@@ -265,7 +270,10 @@ impl MasterReplClient {
     }
 
     fn try_connect() -> Option<TcpStream> {
-        let conn = Profile::get().read_connection()?;
+        Self::try_connect_with(&Profile::get().read_connection()?)
+    }
+
+    fn try_connect_with(conn: &crate::config::ReplConnection) -> Option<TcpStream> {
         let stream = TcpStream::connect((conn.host.as_str(), conn.port)).ok()?;
         stream.set_read_timeout(Some(IO_TIMEOUT)).ok()?;
         stream.set_write_timeout(Some(IO_TIMEOUT)).ok()?;
@@ -367,6 +375,7 @@ impl MasterReplClient {
             cmd.arg(arg);
         }
         cmd.arg(&start_script)
+            .env("ZED_CL_AUTH_TOKEN", generate_auth_token())
             .stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_err));
@@ -425,7 +434,7 @@ impl MasterReplClient {
         self.repl_starting.store(false, Ordering::SeqCst);
         if Self::try_connect().is_some() {
             anyhow::bail!(
-                "Master REPL is listening but did not complete a framed ping. Restart the old SBCL process. Log: {}",
+                "Master REPL is listening but rejected the handshake (stale process or old version). Restart it. Log: {}",
                 log_dir().join("master-repl.log").display()
             );
         }
@@ -437,9 +446,20 @@ impl MasterReplClient {
     }
 
     fn try_ready_stream() -> Option<ReplStream> {
-        let tcp = Self::try_connect()?;
+        let conn = Profile::get().read_connection()?;
+        let tcp = Self::try_connect_with(&conn)?;
         let mut stream = ReplStream::from_tcp(tcp).ok()?;
-        stream.write_frame("(:type \"ping\" :id \"handshake\")").ok()?;
+        // A tokenless connection file means a pre-auth server; fall back to ping.
+        let handshake = match conn.token {
+            Some(token) => ReplRequest::Auth {
+                id: "handshake".to_string(),
+                token,
+            },
+            None => ReplRequest::Ping {
+                id: "handshake".to_string(),
+            },
+        };
+        stream.write_frame(&handshake.to_sexp()).ok()?;
         let response = stream.read_frame().ok()?;
         let parsed = ReplResponse::from_sexp(&response, "handshake").ok()?;
         matches!(parsed.data, ResponseData::Pong).then_some(stream)
@@ -452,10 +472,29 @@ impl MasterReplClient {
             }
             self.stream = None;
         }
-        let stream = self.wait_for_connection()?;
-        debug!("Connected to master REPL");
-        self.stream = Some(stream);
-        Ok(())
+        // A recent full connect-and-spawn failure means the REPL is down (for
+        // example SBCL is not installed); fail fast instead of holding every
+        // request in the 10-45s retry loop.
+        if let Some(at) = self.last_connect_failure {
+            if at.elapsed() < CONNECT_BACKOFF {
+                anyhow::bail!(
+                    "master REPL unavailable; retrying in {}s",
+                    (CONNECT_BACKOFF - at.elapsed()).as_secs().max(1)
+                );
+            }
+        }
+        match self.wait_for_connection() {
+            Ok(stream) => {
+                debug!("Connected to master REPL");
+                self.last_connect_failure = None;
+                self.stream = Some(stream);
+                Ok(())
+            }
+            Err(e) => {
+                self.last_connect_failure = Some(Instant::now());
+                Err(e)
+            }
+        }
     }
 
     pub fn connect(&mut self) -> Result<()> {
@@ -475,6 +514,19 @@ impl MasterReplClient {
     fn next_request_id(&mut self) -> String {
         self.request_counter += 1;
         format!("rust-{}", self.request_counter)
+    }
+
+    /// Send on a fresh connection only if a master REPL is already running.
+    /// Unlike send_request this never spawns one - an interrupt for a dead
+    /// server is meaningless.
+    pub fn send_if_running(&mut self, mut request: ReplRequest) -> Result<ReplResponse> {
+        if self.stream.as_ref().is_none_or(|s| s.is_broken()) {
+            self.stream =
+                Some(Self::try_ready_stream().context("master REPL is not running")?);
+        }
+        self.assign_id(&mut request);
+        let request_id = request.id().to_string();
+        self.write_and_read(&request.to_sexp(), &request_id, request.is_idempotent())
     }
 
     pub fn send_request(&mut self, mut request: ReplRequest) -> Result<ReplResponse> {
@@ -520,7 +572,17 @@ impl MasterReplClient {
             stream.write_frame(sexp)?;
             let response = stream.read_frame()?;
             debug!("Received response: {}", response.trim());
-            ReplResponse::from_sexp(&response, request_id)
+            let parsed = ReplResponse::from_sexp(&response, request_id)?;
+            // A mismatched id means the stream carries a stale frame; drop the
+            // connection rather than hand back someone else's response.
+            if parsed.id != request_id {
+                anyhow::bail!(
+                    "response id {:?} does not match request {:?}",
+                    parsed.id,
+                    request_id
+                );
+            }
+            Ok(parsed)
         })();
         if !idempotent {
             stream.set_read_timeout(Some(IO_TIMEOUT));
@@ -540,6 +602,21 @@ impl MasterReplClient {
         self.stream.take();
         Ok(())
     }
+}
+
+/// 256 bits from OS entropy: each RandomState draws fresh random keys from
+/// the OS, so hashing a counter yields unpredictable output without a rand
+/// dependency. The spawned server prefers this over its own weaker seed.
+fn generate_auth_token() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let mut token = String::with_capacity(64);
+    for i in 0u64..4 {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u64(i);
+        token.push_str(&format!("{:016x}", hasher.finish()));
+    }
+    token
 }
 
 fn find_executable(name: &str) -> Option<PathBuf> {

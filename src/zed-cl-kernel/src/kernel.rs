@@ -252,36 +252,67 @@ impl LispKernel {
             }
         });
 
-        // Main message loop
-        loop {
-            tokio::select! {
-                result = shell.recv_message() => {
-                    match result {
-                        Ok((identities, header, parent_header, metadata, content)) => {
-                            if let Err(e) = self.handle_shell_message(&mut shell, &mut iopub, &identities, &header, &parent_header, &metadata, &content).await {
-                                error!("Error handling shell message: {}", e);
+        // Control runs in its own task: the shell loop blocks for the whole
+        // duration of an eval, and interrupt/shutdown must get through anyway.
+        tokio::spawn(async move {
+            info!("Starting control listener...");
+            loop {
+                match control.recv_message().await {
+                    Ok((identities, header, _parent, _meta, _content)) => {
+                        let msg_type = header["msg_type"].as_str().unwrap_or("");
+                        match msg_type {
+                            "shutdown_request" => {
+                                info!("Handling shutdown_request on control socket");
+                                let content = json!({ "status": "ok", "restart": false });
+                                let _ = control
+                                    .send_message(&identities, "shutdown_reply", &header, &content)
+                                    .await;
+                                std::process::exit(0);
                             }
-                            // Send replies on shell socket
-                            if let Err(e) = self.send_shell_reply(&mut shell, &identities, &header, &parent_header, &content).await {
-                                error!("Error sending shell reply: {}", e);
+                            "interrupt_request" => {
+                                info!("Interrupt requested");
+                                // A fresh connection: the shared client is blocked
+                                // reading the eval response this is meant to abort.
+                                let sent = tokio::task::spawn_blocking(|| {
+                                    MasterReplClient::new()
+                                        .send_if_running(ReplRequest::Interrupt { id: String::new() })
+                                })
+                                .await;
+                                match sent {
+                                    Ok(Ok(_)) => info!("Interrupt delivered to master REPL"),
+                                    Ok(Err(e)) => error!("Interrupt failed: {e:#}"),
+                                    Err(e) => error!("Interrupt task failed: {e}"),
+                                }
+                                let content = json!({ "status": "ok" });
+                                let _ = control
+                                    .send_message(&identities, "interrupt_reply", &header, &content)
+                                    .await;
                             }
+                            other => debug!("Unhandled control message type: {}", other),
                         }
-                        Err(e) => {
-                            error!("Error receiving shell message: {}", e);
-                        }
+                    }
+                    Err(e) => {
+                        error!("Error receiving control message: {}", e);
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
                 }
-                result = control.recv_message() => {
-                    match result {
-                        Ok((identities, header, parent_header, _metadata, _content)) => {
-                            if let Err(e) = self.handle_control_message(&mut control, &identities, &header, &parent_header).await {
-                                error!("Error handling control message: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            error!("Error receiving control message: {}", e);
-                        }
+            }
+        });
+
+        // Main message loop
+        loop {
+            match shell.recv_message().await {
+                Ok((identities, header, parent_header, metadata, content)) => {
+                    if let Err(e) = self.handle_shell_message(&mut shell, &mut iopub, &identities, &header, &parent_header, &metadata, &content).await {
+                        error!("Error handling shell message: {}", e);
                     }
+                    // Send replies on shell socket
+                    if let Err(e) = self.send_shell_reply(&mut shell, &identities, &header, &parent_header, &content).await {
+                        error!("Error sending shell reply: {}", e);
+                    }
+                }
+                Err(e) => {
+                    error!("Error receiving shell message: {}", e);
                 }
             }
         }
@@ -348,31 +379,6 @@ impl LispKernel {
             }
             _ => {
                 warn!("Unhandled message type: {}", msg_type);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Handle control messages
-    async fn handle_control_message(
-        &self,
-        control: &mut Connection<zeromq::RouterSocket>,
-        identities: &[Bytes],
-        header: &Value,
-        _parent_header: &Value,
-    ) -> Result<()> {
-        let msg_type = header["msg_type"].as_str().unwrap_or("");
-
-        match msg_type {
-            "shutdown_request" => {
-                info!("Handling shutdown_request on control socket");
-                // Pass incoming header as parent_header for our reply
-                self.send_shutdown_reply(control, identities, header).await?;
-                std::process::exit(0);
-            }
-            _ => {
-                debug!("Unhandled control message type: {}", msg_type);
             }
         }
 
