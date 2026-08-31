@@ -344,11 +344,18 @@ impl zed::Extension for CommonLispExtension {
             .ok()
             .and_then(|s| s.settings);
 
+        // WASI presents Windows drives as /C:/...; strip the prefix so host
+        // processes get a usable path. The native side normalizes too, but
+        // exporting a broken path in the first place helps nobody.
+        let mut work_dir_str = work_dir.to_string_lossy().to_string();
+        let bytes = work_dir_str.as_bytes();
+        if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':'
+        {
+            work_dir_str.remove(0);
+        }
+
         let mut env = vec![
-            (
-                "ZED_CL_EXTENSION_DIR".to_string(),
-                work_dir.to_string_lossy().to_string(),
-            ),
+            ("ZED_CL_EXTENSION_DIR".to_string(), work_dir_str),
             ("RUST_LOG".to_string(), "info".to_string()),
         ];
 

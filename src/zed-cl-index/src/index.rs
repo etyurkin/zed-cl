@@ -185,7 +185,10 @@ impl SymbolIndex {
         let key = format!("{}::{}", package.to_uppercase(), symbol.to_uppercase());
 
         let read_txn = self.db.begin_read()?;
-        let symbols_table = read_txn.open_table(SYMBOLS_TABLE)?;
+        // A database no file was ever indexed into has no tables yet.
+        let Ok(symbols_table) = read_txn.open_table(SYMBOLS_TABLE) else {
+            return Ok(None);
+        };
         let files_table = read_txn.open_table(FILES_TABLE)?;
 
         if let Some(locations_bytes) = symbols_table.get(key.as_str())? {
@@ -205,7 +208,9 @@ impl SymbolIndex {
     pub fn lookup_symbol(&self, symbol: &str) -> Result<Option<(PathBuf, u32, u32)>> {
         let suffix = format!("::{}", symbol.to_uppercase());
         let read_txn = self.db.begin_read()?;
-        let symbols_table = read_txn.open_table(SYMBOLS_TABLE)?;
+        let Ok(symbols_table) = read_txn.open_table(SYMBOLS_TABLE) else {
+            return Ok(None);
+        };
         let files_table = read_txn.open_table(FILES_TABLE)?;
 
         for entry in symbols_table.iter()? {
@@ -232,14 +237,14 @@ impl SymbolIndex {
     pub fn stats(&self) -> Result<IndexStats> {
         let read_txn = self.db.begin_read()?;
 
-        let file_count = {
-            let files_table = read_txn.open_table(FILES_TABLE)?;
-            files_table.len()?
+        let file_count = match read_txn.open_table(FILES_TABLE) {
+            Ok(files_table) => files_table.len()?,
+            Err(_) => 0,
         };
 
-        let symbol_count = {
-            let symbols_table = read_txn.open_table(SYMBOLS_TABLE)?;
-            symbols_table.len()?
+        let symbol_count = match read_txn.open_table(SYMBOLS_TABLE) {
+            Ok(symbols_table) => symbols_table.len()?,
+            Err(_) => 0,
         };
 
         Ok(IndexStats {

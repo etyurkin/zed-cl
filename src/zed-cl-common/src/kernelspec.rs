@@ -65,7 +65,9 @@ fn kernel_json(kernel: &Path, extension_dir: Option<&str>) -> serde_json::Value 
     let mut env = serde_json::Map::new();
     env.insert("RUST_LOG".into(), json!("info"));
     if let Some(dir) = extension_dir {
-        env.insert("ZED_CL_EXTENSION_DIR".into(), json!(dir.replace('\\', "/")));
+        // Forward slashes for JSON, and strip the WASI /C:/ drive prefix.
+        let dir = crate::normalize_host_path(&dir.replace('\\', "/"));
+        env.insert("ZED_CL_EXTENSION_DIR".into(), json!(dir));
     }
     for key in KERNEL_ENV_KEYS {
         if let Some(value) = std::env::var_os(key).and_then(|v| v.into_string().ok()) {
@@ -111,6 +113,9 @@ mod tests {
         assert_eq!(argv[0], json!("C:/tools/zed-cl-kernel.exe"));
         assert_eq!(argv[1], json!("{connection_file}"));
         assert_eq!(value["env"]["ZED_CL_EXTENSION_DIR"], json!("C:/work/cl"));
+        // The WASI sandbox form of the same directory normalizes identically.
+        let wasi = kernel_json(Path::new("/usr/bin/k"), Some("/C:/work/cl"));
+        assert_eq!(wasi["env"]["ZED_CL_EXTENSION_DIR"], json!("C:/work/cl"));
         assert_eq!(value["interrupt_mode"], json!("message"));
     }
 

@@ -238,7 +238,8 @@ impl MasterReplClient {
     pub fn new() -> Self {
         let extension_dir = std::env::var("ZED_CL_EXTENSION_DIR")
             .ok()
-            .map(PathBuf::from);
+            // The WASI extension exports its work dir as /C:/... on Windows.
+            .map(|dir| PathBuf::from(crate::config::normalize_host_path(&dir)));
 
         Self {
             stream: None,

@@ -114,3 +114,32 @@ pub fn log_dir() -> PathBuf {
 }
 
 pub type Config = Profile;
+
+/// Fix up a host path that came from the extension's WASI sandbox, which
+/// presents Windows drives as "/C:/...". Everything outside the sandbox
+/// needs the bare drive form.
+pub fn normalize_host_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0] == b'/'
+        && bytes[1].is_ascii_alphabetic()
+        && bytes[2] == b':'
+    {
+        path[1..].to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_wasi_drive_prefix_only() {
+        assert_eq!(normalize_host_path("/C:/Users/x"), "C:/Users/x");
+        assert_eq!(normalize_host_path("C:/Users/x"), "C:/Users/x");
+        assert_eq!(normalize_host_path("/home/x"), "/home/x");
+        assert_eq!(normalize_host_path("/c"), "/c");
+    }
+}
