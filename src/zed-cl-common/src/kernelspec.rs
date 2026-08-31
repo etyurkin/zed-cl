@@ -62,7 +62,7 @@ fn kernel_json(kernel: &Path, extension_dir: Option<&str>) -> serde_json::Value 
     let mut env = serde_json::Map::new();
     env.insert("RUST_LOG".into(), json!("info"));
     if let Some(dir) = extension_dir {
-        env.insert("ZED_CL_EXTENSION_DIR".into(), json!(dir.replace('\', "/")));
+        env.insert("ZED_CL_EXTENSION_DIR".into(), json!(dir.replace('\\', "/")));
     }
     for key in KERNEL_ENV_KEYS {
         if let Some(value) = std::env::var_os(key).and_then(|v| v.into_string().ok()) {
@@ -72,7 +72,7 @@ fn kernel_json(kernel: &Path, extension_dir: Option<&str>) -> serde_json::Value 
     json!({
         "display_name": "Common Lisp (Zed)",
         "language": "Common Lisp",
-        "argv": [kernel.to_string_lossy().replace('\', "/"), "{connection_file}"],
+        "argv": [kernel.to_string_lossy().replace('\\', "/"), "{connection_file}"],
         "env": env,
         "interrupt_mode": "message",
         "metadata": { "debugger": false }
