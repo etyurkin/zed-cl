@@ -15,14 +15,19 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_DIR: target
 
+permissions:
+  contents: read
+
 jobs:
   # test and wasm run on both push and pull_request so same-repo PR merge
   # commits still get checked; only the 4-runner build matrix is deduplicated.
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
       - uses: ./.github/actions/fetch-grammar
       - run: cargo test --manifest-path src/zed-cl-common/Cargo.toml
       - run: cargo test --manifest-path src/zed-cl-lsp/Cargo.toml
@@ -31,8 +36,10 @@ jobs:
   wasm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
         with:
           targets: wasm32-wasip2
       - run: cargo build --release --target wasm32-wasip2 --manifest-path extension/Cargo.toml
@@ -53,11 +60,13 @@ jobs:
             asset: zed-cl-windows-x86_64.zip
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/build-native
         with:
           asset: ${{ matrix.asset }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
